@@ -1,11 +1,7 @@
 // scripts/initDatabase.js
 const mongoose = require('mongoose');
-const { seedTasks } = require('../seeders/taskSeeder');
-const { seedConfigurations } = require('../seeders/configSeeder');
 const User = require('../models/User');
 const bcrypt = require('bcryptjs');
-const fs = require('fs').promises;
-const path = require('path');
 
 // Set mongoose options
 mongoose.set('strictQuery', false); // Fix deprecation warning
@@ -20,28 +16,10 @@ const initializeDatabase = async () => {
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB\n');
     
-    // Create necessary directories
-    // await createDirectories();
-    
-    // Seed configurations
-    // console.log('📝 Seeding configurations...');
-    // await seedConfigurations();
-    // console.log('✅ Configurations seeded successfully\n');
-    
-    // Seed tasks
-    // console.log('📋 Seeding tasks...');
-    // await seedTasks();
-    // console.log('✅ Tasks seeded successfully\n');
-    
     // Create default admin user if it doesn't exist
     console.log('👤 Creating default admin user...');
     await createDefaultAdmin();
     console.log('✅ Default admin user setup completed\n');
-    
-    // Create sample client user if it doesn't exist
-    // console.log('👥 Creating sample client user...');
-    // await createSampleClient();
-    // console.log('✅ Sample client user setup completed\n');
     
     console.log('🎉 Database initialization completed successfully!');
     
@@ -49,28 +27,6 @@ const initializeDatabase = async () => {
     console.error('❌ Database initialization failed:', error);
     process.exit(1);
   }
-};
-
-// Create necessary directories
-const createDirectories = async () => {
-  const directories = [
-    'uploads/temp',
-    'uploads/csv-documents', // For permanent CSV storage
-    'storage/results',
-    'storage/logs'
-  ];
-  
-  for (const dir of directories) {
-    const fullPath = path.join(process.cwd(), dir);
-    try {
-      await fs.access(fullPath);
-      console.log(`✓ Directory ${dir} already exists`);
-    } catch {
-      await fs.mkdir(fullPath, { recursive: true });
-      console.log(`✓ Created directory ${dir}`);
-    }
-  }
-  console.log();
 };
 
 // Create default admin user
@@ -100,39 +56,6 @@ const createDefaultAdmin = async () => {
     console.log('⚠️  Please change the default password after first login!');
   } else {
     console.log(`- Admin user already exists: ${adminEmail}`);
-  }
-};
-
-// Create sample client user
-const createSampleClient = async () => {
-  const clientEmail = process.env.DEFAULT_CLIENT_EMAIL || 'client@example.com';
-  const clientPassword = process.env.DEFAULT_CLIENT_PASSWORD || 'client123!';
-  const defaultBalance = process.env.DEFAULT_CLIENT_BALANCE || 5;
-  
-  const existingClient = await User.findOne({ email: clientEmail });
-  
-  if (!existingClient) {
-    const hashedPassword = await bcrypt.hash(clientPassword, 12);
-    
-    const client = new User({
-      email: clientEmail,
-      password: hashedPassword,
-      role: 'client',
-      balance: parseFloat(defaultBalance),
-      isActive: true,
-      profile: {
-        firstName: 'Sample',
-        lastName: 'Client',
-        company: 'Test Company'
-      }
-    });
-    
-    await client.save();
-    console.log(`✓ Sample client created with email: ${clientEmail}`);
-    console.log(`✓ Default password: ${clientPassword}`);
-    console.log(`✓ Initial balance: ${defaultBalance}`);
-  } else {
-    console.log(`- Sample client already exists: ${clientEmail}`);
   }
 };
 
@@ -167,9 +90,9 @@ const cleanupDatabase = async () => {
 // Environment validation
 const validateEnvironment = () => {
   const requiredEnvVars = [
-    'FOREST_API_BASE_URL',
-    'FOREST_API_KEY',
-    'JWT_SECRET'
+    'DEFAULT_ADMIN_EMAIL',
+    'DEFAULT_ADMIN_PASSWORD',
+    'MONGO_URI'
   ];
   
   const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -227,6 +150,5 @@ if (require.main === module) {
 module.exports = {
   initializeDatabase,
   cleanupDatabase,
-  createDefaultAdmin,
-  createSampleClient
+  createDefaultAdmin
 };
