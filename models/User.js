@@ -42,6 +42,25 @@ const userSchema = new mongoose.Schema({
     phone: String,
     company: String,
   },
+  paymentMethods: [{
+    type: {
+      type: String,
+      enum: ["mpesa", "bank", "crypto"],
+      required: true
+    },
+    details: {
+      type: mongoose.Schema.Types.Mixed,
+      required: true
+    },
+    isDefault: {
+      type: Boolean,
+      default: false
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   createdAt: {
     type: Date,
     default: Date.now,

@@ -429,6 +429,151 @@ const getOwnBalance = asyncHandler(async (req, res) => {
   res.status(response.statusCode).json(response);
 });
 
+// Add a payment method
+const addPaymentMethod = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+  
+  if (!user) {
+    const response = formatResponse(false, null, 'User not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  const { type, details } = req.body;
+  
+  if (!type || !['mpesa', 'bank', 'crypto'].includes(type)) {
+    const response = formatResponse(false, null, 'Valid payment method type is required', 400);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  if (!details || typeof details !== 'object') {
+    const response = formatResponse(false, null, 'Valid payment details are required', 400);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  // If it's the first payment method, make it default
+  const isDefault = user.paymentMethods.length === 0;
+  
+  user.paymentMethods.push({
+    type,
+    details,
+    isDefault
+  });
+  
+  await user.save();
+  
+  const response = formatResponse(true, user.paymentMethods, 'Payment method added successfully');
+  res.status(response.statusCode).json(response);
+});
+
+// Delete a payment method
+const deletePaymentMethod = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+  
+  if (!user) {
+    const response = formatResponse(false, null, 'User not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  const { methodId } = req.params;
+  
+  const methodIndex = user.paymentMethods.findIndex(
+    method => method._id.toString() === methodId
+  );
+  
+  if (methodIndex === -1) {
+    const response = formatResponse(false, null, 'Payment method not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  const wasDefault = user.paymentMethods[methodIndex].isDefault;
+  
+  // Remove the payment method
+  user.paymentMethods.splice(methodIndex, 1);
+  
+  // If we removed the default and there are other methods, make the first one default
+  if (wasDefault && user.paymentMethods.length > 0) {
+    user.paymentMethods[0].isDefault = true;
+  }
+  
+  await user.save();
+  
+  const response = formatResponse(true, user.paymentMethods, 'Payment method deleted successfully');
+  res.status(response.statusCode).json(response);
+});
+
+// Edit a payment method
+const editPaymentMethod = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+  
+  if (!user) {
+    const response = formatResponse(false, null, 'User not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  const { methodId } = req.params;
+  const { type, details } = req.body;
+  
+  const methodIndex = user.paymentMethods.findIndex(
+    method => method._id.toString() === methodId
+  );
+  
+  if (methodIndex === -1) {
+    const response = formatResponse(false, null, 'Payment method not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  if (type) {
+    if (!['mpesa', 'bank', 'crypto'].includes(type)) {
+      const response = formatResponse(false, null, 'Valid payment method type is required', 400);
+      return res.status(response.statusCode).json(response);
+    }
+    user.paymentMethods[methodIndex].type = type;
+  }
+  
+  if (details && typeof details === 'object') {
+    user.paymentMethods[methodIndex].details = details;
+  }
+  
+  await user.save();
+  
+  const response = formatResponse(true, user.paymentMethods, 'Payment method updated successfully');
+  res.status(response.statusCode).json(response);
+});
+
+// Set a payment method as default
+const setDefaultPaymentMethod = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id);
+  
+  if (!user) {
+    const response = formatResponse(false, null, 'User not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  const { methodId } = req.params;
+  
+  const methodIndex = user.paymentMethods.findIndex(
+    method => method._id.toString() === methodId
+  );
+  
+  if (methodIndex === -1) {
+    const response = formatResponse(false, null, 'Payment method not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+  
+  // Set all to false
+  user.paymentMethods.forEach(method => {
+    method.isDefault = false;
+  });
+  
+  // Set selected to true
+  user.paymentMethods[methodIndex].isDefault = true;
+  
+  await user.save();
+  
+  const response = formatResponse(true, user.paymentMethods, 'Default payment method updated');
+  res.status(response.statusCode).json(response);
+});
+
 module.exports = {
   // Admin user management
   getAllUsers,
@@ -442,5 +587,9 @@ module.exports = {
   // User profile management
   getOwnProfile,
   updateOwnProfile,
-  getOwnBalance
+  getOwnBalance,
+  addPaymentMethod,
+  deletePaymentMethod,
+  editPaymentMethod,
+  setDefaultPaymentMethod
 };
