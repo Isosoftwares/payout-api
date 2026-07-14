@@ -29,14 +29,14 @@ const initializeDatabase = async () => {
     // console.log('✅ Configurations seeded successfully\n');
     
     // Seed tasks
-    console.log('📋 Seeding tasks...');
-    await seedTasks();
-    console.log('✅ Tasks seeded successfully\n');
+    // console.log('📋 Seeding tasks...');
+    // await seedTasks();
+    // console.log('✅ Tasks seeded successfully\n');
     
     // Create default admin user if it doesn't exist
-    // console.log('👤 Creating default admin user...');
-    // await createDefaultAdmin();
-    // console.log('✅ Default admin user setup completed\n');
+    console.log('👤 Creating default admin user...');
+    await createDefaultAdmin();
+    console.log('✅ Default admin user setup completed\n');
     
     // Create sample client user if it doesn't exist
     // console.log('👥 Creating sample client user...');
