@@ -35,16 +35,13 @@ const getAdminPendingCount = async (req, res) => {
     if (req.user.role !== 'admin') {
       return res.status(403).json(formatResponse(false, null, 'Forbidden', 403));
     }
-    const VirtualAccount = require('../models/VirtualAccount');
-    const PayoutRequest = require('../models/PayoutRequest');
+    const PayoutName = require('../models/PayoutName');
     
-    const pendingBankDetails = await VirtualAccount.countDocuments({ status: 'pending_bank_details' });
-    const pendingPayoutRequests = await PayoutRequest.countDocuments({ status: 'pending' });
+    const maturedCount = await PayoutName.countDocuments({ paymentStatus: 'matured' });
     
     res.status(200).json(formatResponse(true, {
-      pendingBankDetails,
-      pendingPayoutRequests,
-      totalPending: pendingBankDetails + pendingPayoutRequests
+      maturedCount,
+      totalPending: maturedCount
     }, 'Admin pending counts fetched successfully'));
   } catch (error) {
     res.status(500).json(formatResponse(false, null, error.message, 500));

@@ -8,10 +8,13 @@ const cors = require('cors')
 const corsOptions = require('./config/corsOptions')
 const connectDB = require('./config/dbConn')
 const mongoose = require('mongoose')
+// Cron job will be started after DB connection
+const { startCron } = require('./cron');
+
 const PORT = process.env.PORT || 3500
 const allowedOrigins = require('./config/allowedOrigins')
 const bodyParser = require('body-parser');
-const {logger} = require('./middleware/logger')
+const { logger } = require('./middleware/logger')
 
 
 process.env.TZ = 'Africa/Nairobi';
@@ -64,6 +67,7 @@ app.use(errorHandler)
 mongoose.connection.once('open', () => {
   console.log(process.env.NODE_ENV)
   console.log('connected to mongo db')
+  startCron();
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`))
 })
 

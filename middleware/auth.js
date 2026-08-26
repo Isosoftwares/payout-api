@@ -23,8 +23,20 @@ const authenticateToken = async (req, res, next) => {
     
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
-    // Get user from database to ensure they still exist and are active
-    const user = await User.findById(decoded.id).select('-password');
+    let user;
+    if (decoded.role === 'subaccount') {
+      const Subaccount = require('../models/Subaccount');
+      user = await Subaccount.findById(decoded.id).select('-password');
+      if (user) {
+        user = user.toObject();
+        user.role = 'subaccount';
+        user.isActive = true;
+        user.id = user._id.toString(); // Ensure id is available
+      }
+    } else {
+      user = await User.findById(decoded.id).select('-password');
+      user.id = user._id.toString(); // Ensure id is available
+    }
     
     if (!user) {
       const response = formatResponse(false, null, 'User not found', 401);

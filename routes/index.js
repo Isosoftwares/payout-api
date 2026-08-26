@@ -5,11 +5,14 @@ const router = express.Router();
 // Import route modules
 const authRoutes = require("./authRoutes");
 const userRoutes = require("./userRoutes");
-const paymentRoutes = require("./paymentRoutes");
 const supportRoutes = require("./supportRoutes");
 const virtualAccountRoutes = require("./virtualAccountRoutes");
 const transactionRoutes = require("./transactionRoutes");
 const notificationRoutes = require("./notificationRoutes");
+const payoutNameRoutes = require("./payoutNameRoutes");
+const subaccountRoutes = require("./subaccountRoutes");
+const paymentRoutes = require("./paymentRoutes");
+const batchPayoutRoutes = require("./batchPayoutRoutes");
 
 // Health check endpoint
 router.get("/health", (req, res) => {
@@ -21,57 +24,18 @@ router.get("/health", (req, res) => {
   });
 });
 
-// API Documentation endpoint
-// router.get('/docs', (req, res) => {
-//   res.status(200).json({
-//     success: true,
-//     message: 'Forest Lookup API Documentation',
-//     version: '1.0.0',
-//     endpoints: {
-//       authentication: {
-//         login: 'POST /api/auth/login',
-//         register: 'POST /api/auth/register',
-//         refresh: 'POST /api/auth/refresh',
-//         logout: 'POST /api/auth/logout',
-//         verify: 'POST /api/auth/verify',
-//         changePassword: 'POST /api/auth/change-password'
-//       },
-//       users: {
-//         profile: 'GET /api/users/profile',
-//         updateProfile: 'PUT /api/users/profile',
-//         balance: 'GET /api/users/balance',
-//         adminManagement: '/api/users/admin/*'
-//       },
-//       tasks: {
-//         adminManagement: '/api/admin/tasks/*'
-//       },
-//       configurations: {
-//         adminManagement: '/api/admin/config/*'
-//       },
-//       lookups: {
-//         availableTasks: 'GET /api/lookup/tasks',
-//         singleLookup: 'POST /api/lookup/single',
-//         csvLookup: 'POST /api/lookup/csv'
-//       },
-//       history: {
-//         list: 'GET /api/history',
-//         statistics: 'GET /api/history/statistics',
-//         recent: 'GET /api/history/recent',
-//         details: 'GET /api/history/:id',
-//         download: 'GET /api/history/:id/download'
-//       }
-//     }
-//   });
-// });
 
 // Mount route modules
 router.use("/auth", authRoutes);
 router.use("/users", userRoutes);
-router.use("/payments", paymentRoutes);
 router.use("/support", supportRoutes);
 router.use("/virtual-accounts", virtualAccountRoutes);
 router.use("/transactions", transactionRoutes);
 router.use("/notifications", notificationRoutes);
+router.use("/payout-names", payoutNameRoutes);
+router.use("/subaccounts", subaccountRoutes);
+router.use("/payments", paymentRoutes);
+router.use("/batch-payouts", batchPayoutRoutes);
 
 // 404 handler for API routes
 router.use("*", (req, res) => {

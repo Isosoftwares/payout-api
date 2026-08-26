@@ -70,19 +70,29 @@ const login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
   
   if (!email || !password) {
-    const response = formatResponse(false, null, 'Email and password are required', 400);
+    const response = formatResponse(false, null, 'Email/Username and password are required', 400);
     return res.status(response.statusCode).json(response);
   }
   
-  // Find user
-  const user = await User.findOne({ email });
+  // Try finding user by email first
+  let user = await User.findOne({ email: email.toLowerCase() });
+  let isSubaccount = false;
+  
+  if (!user) {
+    // If not a user, try finding a subaccount by username
+    const Subaccount = require('../models/Subaccount');
+    user = await Subaccount.findOne({ username: email.toLowerCase() });
+    if (user) {
+      isSubaccount = true;
+    }
+  }
   
   if (!user) {
     const response = formatResponse(false, null, 'Invalid credentials', 401);
     return res.status(response.statusCode).json(response);
   }
 
-  if (!user.isActive) {
+  if (!isSubaccount && !user.isActive) {
     const response = formatResponse(false, null, 'Account is deactivated', 403);
     return res.status(response.statusCode).json(response);
   }
@@ -96,7 +106,24 @@ const login = asyncHandler(async (req, res) => {
   }
   
   // Generate tokens
-  const { accessToken, refreshToken } = generateTokens(user);
+  const payload = {
+    id: user._id,
+    email: isSubaccount ? user.username : user.email,
+    role: isSubaccount ? 'subaccount' : user.role,
+    ...(isSubaccount && { clientId: user.clientId })
+  };
+
+  const accessToken = jwt.sign(
+    payload,
+    process.env.JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+
+  const refreshToken = jwt.sign(
+    payload,
+    process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
   
   // Set refresh token in httpOnly cookie
   res.cookie('refreshToken', refreshToken, {
@@ -109,6 +136,9 @@ const login = asyncHandler(async (req, res) => {
   // Remove password from response
   const userResponse = user.toObject();
   delete userResponse.password;
+  if (isSubaccount) {
+    userResponse.role = 'subaccount';
+  }
   
   const response = formatResponse(true, {
     user: userResponse,
@@ -184,7 +214,21 @@ const refreshToken = asyncHandler(async (req, res) => {
     const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET);
     
     // Get user from database to ensure they still exist and are active
-    const user = await User.findById(decoded.id).select('-password');
+    let user;
+    let isSubaccount = false;
+    
+    if (decoded.role === 'subaccount') {
+      const Subaccount = require('../models/Subaccount');
+      user = await Subaccount.findById(decoded.id).select('-password');
+      if (user) {
+        user = user.toObject();
+        user.role = 'subaccount';
+        user.isActive = true;
+        isSubaccount = true;
+      }
+    } else {
+      user = await User.findById(decoded.id).select('-password');
+    }
     
     if (!user) {
       // Clear the invalid refresh token cookie
@@ -193,7 +237,7 @@ const refreshToken = asyncHandler(async (req, res) => {
       return res.status(response.statusCode).json(response);
     }
     
-    if (!user.isActive) {
+    if (!isSubaccount && !user.isActive) {
       // Clear the refresh token cookie for inactive user
       res.clearCookie('refreshToken');
       const response = formatResponse(false, null, 'Account is deactivated', 401);
@@ -201,7 +245,17 @@ const refreshToken = asyncHandler(async (req, res) => {
     }
     
     // Generate new tokens
-    const tokens = generateTokens(user);
+    const payload = {
+      id: user._id || user.id,
+      email: isSubaccount ? user.username : user.email,
+      role: isSubaccount ? 'subaccount' : user.role,
+      ...(isSubaccount && { clientId: user.clientId })
+    };
+
+    const tokens = {
+      accessToken: jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '15m' }),
+      refreshToken: jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, { expiresIn: '7d' })
+    };
     
     // Update refresh token cookie
     res.cookie('refreshToken', tokens.refreshToken, {
@@ -262,9 +316,21 @@ const verifyToken = asyncHandler(async (req, res) => {
   
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select('-password');
     
-    if (!user || !user.isActive) {
+    let user;
+    if (decoded.role === 'subaccount') {
+      const Subaccount = require('../models/Subaccount');
+      user = await Subaccount.findById(decoded.id).select('-password');
+      if (user) {
+        user = user.toObject();
+        user.role = 'subaccount';
+        user.isActive = true;
+      }
+    } else {
+      user = await User.findById(decoded.id).select('-password');
+    }
+    
+    if (!user || (!user.isActive && user.role !== 'subaccount')) {
       const response = formatResponse(false, null, 'Invalid or inactive user', 401);
       return res.status(response.statusCode).json(response);
     }

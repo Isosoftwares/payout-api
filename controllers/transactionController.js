@@ -94,9 +94,25 @@ const createPayoutRequest = async (req, res) => {
 
 const getPayoutRequests = async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    
     const filter = req.user.role === 'admin' ? {} : { client: req.user.id };
-    const requests = await PayoutRequest.find(filter).populate('virtualAccount').populate('client', 'email profile');
-    res.status(200).json(formatResponse(true, requests, 'Payout requests fetched successfully'));
+    const total = await PayoutRequest.countDocuments(filter);
+    
+    const requests = await PayoutRequest.find(filter)
+      .populate('virtualAccount')
+      .populate('client', 'email profile')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+      
+    res.status(200).json(formatResponse(true, {
+      data: requests,
+      total,
+      page,
+      pages: Math.ceil(total / limit)
+    }, 'Payout requests fetched successfully'));
   } catch (error) {
     res.status(500).json(formatResponse(false, null, error.message, 500));
   }
@@ -221,9 +237,24 @@ const getFeeLedger = async (req, res) => {
 
 const getTransactions = async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    
     const filter = req.user.role === 'admin' ? {} : { client: req.user.id };
-    const transactions = await Transaction.find(filter).populate('virtualAccount').sort({ createdAt: -1 });
-    res.status(200).json(formatResponse(true, transactions, 'Transactions fetched successfully'));
+    const total = await Transaction.countDocuments(filter);
+    
+    const transactions = await Transaction.find(filter)
+      .populate('virtualAccount')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+      
+    res.status(200).json(formatResponse(true, {
+      data: transactions,
+      total,
+      page,
+      pages: Math.ceil(total / limit)
+    }, 'Transactions fetched successfully'));
   } catch (error) {
     res.status(500).json(formatResponse(false, null, error.message, 500));
   }

@@ -1,60 +1,48 @@
-// routes/paymentRoutes.js
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-
-// Import controllers
-const paymentController = require('../controllers/paymentController');
-
-// Import middleware
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const { authenticateToken, isAdmin } = require("../middleware/auth");
 const { 
-  authenticateToken, 
-  isAdmin, 
-  isClient, 
-  isAuthenticated,
-  createRateLimit 
-} = require('../middleware/auth');
+  uploadPayments, 
+  getMaturitySettings, 
+  updateMaturitySettings,
+  getUploadHistories,
+  downloadUploadReport
+} = require("../controllers/paymentController");
 
-// Rate limiting
-const paymentRateLimit = createRateLimit(60 * 1000, 10, 'Too many payment requests, please try again later');
-const webhookRateLimit = createRateLimit(60 * 1000, 100, 'Too many webhook requests');
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, "..", "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
-// ================================
-// PUBLIC ROUTES (NOWPayments)
-// ================================
+// Multer config
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    cb(null, `payments-${Date.now()}${path.extname(file.originalname)}`);
+  },
+});
 
-// NOWPayments webhook (no authentication required)
-router.post('/nowpayments/webhook', paymentController.handleNowPaymentsWebhook);
+const upload = multer({
+  storage: storage,
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext !== ".csv") {
+      return cb(new Error("Only CSV files are allowed"));
+    }
+    cb(null, true);
+  },
+});
 
-// Get supported currencies (public)
-router.get('/currencies', paymentController.getAllCurrencies);
-
-// Get minimum payment amount (public)
-router.get('/minimum/:crypto', paymentController.getMinimumAmount);
-
-// ================================
-// AUTHENTICATED CLIENT ROUTES
-// ================================
-
-// Get user's transaction history and balance
-router.get('/user/:userId', authenticateToken, isAuthenticated, paymentController.getUserTransactions);
-
-// Get specific transaction details
-router.get('/user/:userId/transaction/:transactionId', authenticateToken, isAuthenticated, paymentController.getTransaction);
-
-// Create new payment request
-router.post('/create', authenticateToken, isClient, paymentRateLimit, paymentController.createPayment);
-
-// Get payment status (for polling)
-router.get('/status/:userId/:transactionId', authenticateToken, isAuthenticated, paymentController.getPaymentStatus);
-
-// ================================
-// ADMIN ROUTES
-// ================================
-
-// Add balance manually (admin only)
-router.post('/admin/add-balance', authenticateToken, isAdmin, paymentController.addBalance);
-
-// Deduct balance manually (admin only)
-router.post('/admin/deduct-balance', authenticateToken, isAdmin, paymentController.deductBalance);
+router.post("/upload", authenticateToken, isAdmin, upload.single("file"), uploadPayments);
+router.get("/maturity-settings", authenticateToken, isAdmin, getMaturitySettings);
+router.put("/maturity-settings", authenticateToken, isAdmin, updateMaturitySettings);
+router.get("/upload-histories", authenticateToken, isAdmin, getUploadHistories);
+router.get("/upload-histories/:id/download", authenticateToken, isAdmin, downloadUploadReport);
 
 module.exports = router;

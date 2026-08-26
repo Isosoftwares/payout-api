@@ -21,9 +21,38 @@ const createVirtualAccount = async (req, res) => {
 
 const getVirtualAccounts = async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || '';
+    const status = req.query.status || 'all';
+
     const filter = req.user.role === 'admin' ? {} : { client: req.user.id };
-    const accounts = await VirtualAccount.find(filter).populate('client', 'profile email feePercentage');
-    res.status(200).json(formatResponse(true, accounts, 'Accounts fetched successfully'));
+    
+    if (search) {
+      filter.$or = [
+        { firstName: { $regex: search, $options: 'i' } },
+        { lastName: { $regex: search, $options: 'i' } },
+        { identifier: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    if (status !== 'all') {
+      filter.status = status;
+    }
+
+    const total = await VirtualAccount.countDocuments(filter);
+    const accounts = await VirtualAccount.find(filter)
+      .populate('client', 'profile email feePercentage')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+      
+    res.status(200).json(formatResponse(true, {
+      data: accounts,
+      total,
+      page,
+      pages: Math.ceil(total / limit)
+    }, 'Accounts fetched successfully'));
   } catch (error) {
     res.status(500).json(formatResponse(false, null, error.message, 500));
   }

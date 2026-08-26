@@ -150,7 +150,9 @@ const getAllUsers = asyncHandler(async (req, res) => {
 
 // Get user by ID
 const getUserById = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id).select('-password');
+  const user = await User.findById(req.params.id)
+    .select('-password')
+    .populate('createdBy', 'profile.firstName profile.lastName email');
   
   if (!user) {
     const response = formatResponse(false, null, 'User not found', 404);
@@ -169,6 +171,34 @@ const getUserById = asyncHandler(async (req, res) => {
       }
     }
   ]);
+
+  const PayoutName = require('../models/PayoutName');
+  const myNames = await PayoutName.find({ allocatedTo: user._id });
+
+  let totalReceivedUSD = 0;
+  let totalMaturedUSD = 0;
+
+  myNames.forEach(name => {
+    const amt = name.amount || 0;
+    if (name.paymentStatus === 'received') {
+      totalReceivedUSD += amt;
+    } else if (name.paymentStatus === 'matured') {
+      totalMaturedUSD += amt;
+    }
+  });
+
+  const PayoutTransaction = require('../models/PayoutTransaction');
+  const profitStats = await PayoutTransaction.aggregate([
+    { $match: { clientId: user._id, status: 'completed' } },
+    {
+      $group: {
+        _id: null,
+        totalProfitUSD: { $sum: '$totalProfitUSD' },
+        totalPaidUSD: { $sum: '$grossAmountUSD' },
+        totalFeesUSD: { $sum: '$feeAmountUSD' }
+      }
+    }
+  ]);
   
   const userData = {
     ...user.toObject(),
@@ -176,7 +206,12 @@ const getUserById = asyncHandler(async (req, res) => {
       totalRequests: 0,
       totalSpent: 0,
       lastActivity: null
-    }
+    },
+    totalProfitUSD: profitStats[0]?.totalProfitUSD || 0,
+    totalPaidUSD: profitStats[0]?.totalPaidUSD || 0,
+    totalFeesUSD: profitStats[0]?.totalFeesUSD || 0,
+    totalReceivedUSD,
+    totalMaturedUSD
   };
   
   const response = formatResponse(true, userData);
@@ -208,6 +243,9 @@ const createUser = asyncHandler(async (req, res) => {
     password: hashedPassword,
     mustChangePassword: true, // Force password change for admin-created accounts
     feePercentage: req.body.feePercentage || 0,
+    usdBuyPrice: req.body.usdBuyPrice || 0,
+    usdSellPrice: req.body.usdSellPrice || 0,
+    createdBy: req.user.id,
   };
   
   const user = new User(userData);
@@ -429,6 +467,57 @@ const getOwnBalance = asyncHandler(async (req, res) => {
   res.status(response.statusCode).json(response);
 });
 
+// Get Client Dashboard Stats
+const getClientDashboardStats = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user.id).select('feePercentage usdBuyPrice usdSellPrice paymentMethods');
+  
+  if (!user) {
+    return res.status(404).json(formatResponse(false, null, 'User not found', 404));
+  }
+
+  const PayoutName = require('../models/PayoutName');
+  const myNames = await PayoutName.find({ allocatedTo: req.user.id });
+
+  let totalReceivedUSD = 0;
+  let totalMaturedUSD = 0;
+  let totalPaidUSD = 0;
+
+  myNames.forEach(name => {
+    const amt = name.amount || 0;
+    if (name.paymentStatus === 'received') {
+      totalReceivedUSD += amt;
+    } else if (name.paymentStatus === 'matured') {
+      totalMaturedUSD += amt;
+    }
+  });
+
+  const PayoutTransaction = require('../models/PayoutTransaction');
+  const paidStats = await PayoutTransaction.aggregate([
+    { $match: { clientId: user._id, status: 'completed' } },
+    {
+      $group: {
+        _id: null,
+        totalPaidUSD: { $sum: '$grossAmountUSD' }
+      }
+    }
+  ]);
+
+  if (paidStats.length > 0) {
+    totalPaidUSD = paidStats[0].totalPaidUSD;
+  }
+
+  res.status(200).json(formatResponse(true, {
+    totalReceivedUSD,
+    totalMaturedUSD,
+    totalPaidUSD,
+    feePercentage: user.feePercentage,
+    usdBuyPrice: user.usdBuyPrice,
+    usdSellPrice: user.usdSellPrice,
+    paymentMethods: user.paymentMethods,
+    totalNamesCount: myNames.length
+  }));
+});
+
 // Add a payment method
 const addPaymentMethod = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.id);
@@ -591,5 +680,6 @@ module.exports = {
   addPaymentMethod,
   deletePaymentMethod,
   editPaymentMethod,
-  setDefaultPaymentMethod
+  setDefaultPaymentMethod,
+  getClientDashboardStats
 };

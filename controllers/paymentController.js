@@ -1,732 +1,277 @@
-// controllers/paymentController.js
-const Transaction = require("../models/Payment");
-const User = require("../models/User");
-const axios = require("axios");
-const crypto = require("crypto");
+const PayoutName = require('../models/PayoutName');
+const MaturitySetting = require('../models/MaturitySetting');
+const PaymentUploadHistory = require('../models/PaymentUploadHistory');
+const csv = require('csv-parser');
+const fs = require('fs');
+const { createObjectCsvStringifier } = require('csv-writer');
+const Notification = require('../models/Notification');
 
-// Error handling wrapper
-const asyncHandler = (fn) => (req, res, next) => {
-  Promise.resolve(fn(req, res, next)).catch(next);
+// Seed maturity settings if they don't exist
+const initializeMaturitySettings = async () => {
+  const count = await MaturitySetting.countDocuments();
+  if (count === 0) {
+    const defaultSettings = [
+      { dayOfWeek: 0, dayName: "Sunday", offsetDays: 1 },
+      { dayOfWeek: 1, dayName: "Monday", offsetDays: 2 },
+      { dayOfWeek: 2, dayName: "Tuesday", offsetDays: 2 },
+      { dayOfWeek: 3, dayName: "Wednesday", offsetDays: 2 },
+      { dayOfWeek: 4, dayName: "Thursday", offsetDays: 2 },
+      { dayOfWeek: 5, dayName: "Friday", offsetDays: 4 }, // skips weekend
+      { dayOfWeek: 6, dayName: "Saturday", offsetDays: 3 }, // skips weekend
+    ];
+    await MaturitySetting.insertMany(defaultSettings);
+  }
 };
 
-// Response formatter
-const formatResponse = (success, data, message = null, statusCode = 200) => ({
-  success,
-  data,
-  message,
-  statusCode,
-});
-
-// Environment variables
-const { NOWPAYMENT_API_KEY, API_DOMAIN } = process.env;
-
-// Pure function to validate payment data
-const validatePaymentData = (data) => {
-  const errors = [];
-
-  if (!data.amount || data.amount <= 0) {
-    errors.push("Valid amount is required");
-  }
-
-  if (!data.cryptoCurrency) {
-    errors.push("Crypto currency is required");
-  }
-
-  if (!data.userId) {
-    errors.push("User ID is required");
-  }
-
-  return {
-    isValid: errors.length === 0,
-    errors,
-  };
-};
-
-function generateUniqueString(length = 10) {
-  const bytes = crypto.randomBytes(Math.ceil(length * 0.75)); // base64 expands ~33%
-  return bytes
-    .toString("base64")
-    .replace(/[^a-zA-Z0-9]/g, "") // remove +, /, = characters
-    .slice(0, length);
-}
-
-// Pure function to calculate remaining amount for partial payments
-const calculateRemainingAmount = (priceAmount, actuallyPaid) => {
-  const remaining = parseFloat(priceAmount) - parseFloat(actuallyPaid || 0);
-  return remaining > 0 ? remaining : 0;
-};
-
-// ================================
-// TRANSACTION MANAGEMENT
-// ================================
-
-// Get user transactions with filters
-const getUserTransactions = asyncHandler(async (req, res) => {
-  const { userId } = req.params;
-  const {
-    status,
-    page = 1,
-    limit = 30,
-    startDate,
-    endDate,
-    transactionType,
-  } = req.query;
-
-  // Check if user exists
-  const user = await User.findById(userId);
-  if (!user) {
-    const response = formatResponse(false, null, "User not found", 404);
-    return res.status(response.statusCode).json(response);
-  }
-
-  // Build filter
-  const filter = {};
-  
-  if (user.role == "client") {
-    filter.userId = userId;
-  }
-
-  if (status) {
-    filter.status = status;
-  }
-
-  if (transactionType) {
-    filter.transactionType = transactionType;
-  }
-
-  if (startDate || endDate) {
-    filter.createdAt = {};
-    if (startDate) {
-      filter.createdAt.$gte = new Date(startDate);
-    }
-    if (endDate) {
-      filter.createdAt.$lte = new Date(endDate);
-    }
-  }
-
-  // Get transactions with pagination
-  const options = {
-    page: parseInt(page),
-    limit: parseInt(limit),
-  };
-
-  const transactions = await Transaction.find(filter)
-    .sort({ createdAt: -1 })
-    .limit(options.limit * 1)
-    .skip((options.page - 1) * options.limit)
-    .populate("adminUserId", "email")
-    .populate("lookupHistoryId");
-
-  const total = await Transaction.countDocuments(filter);
-
-  // Get user statistics
-  const statistics = await Transaction.getUserStatistics(userId);
-
-  const response = formatResponse(true, {
-    balance: user.balance,
-    transactions,
-    statistics,
-    pagination: {
-      page: options.page,
-      limit: options.limit,
-      total,
-      pages: Math.ceil(total / options.limit),
-    },
-  });
-
-  res.status(response.statusCode).json(response);
-});
-
-// Get specific transaction
-const getTransaction = asyncHandler(async (req, res) => {
-  const { userId, transactionId } = req.params;
-
-  // Verify user exists
-  const user = await User.findById(userId);
-  if (!user) {
-    const response = formatResponse(false, null, "User not found", 404);
-    return res.status(response.statusCode).json(response);
-  }
-
-  const transaction = await Transaction.findOne({
-    $or: [
-      { _id: transactionId, userId },
-      { paymentId: transactionId, userId },
-    ],
-  })
-    .populate("adminUserId", "email")
-    .populate("lookupHistoryId");
-
-  if (!transaction) {
-    const response = formatResponse(false, null, "Transaction not found", 404);
-    return res.status(response.statusCode).json(response);
-  }
-
-  const response = formatResponse(true, transaction);
-  res.status(response.statusCode).json(response);
-});
-
-// Admin: Add balance manually
-const addBalance = asyncHandler(async (req, res) => {
-  const { userId, amount, note } = req.body;
-  const adminUserId = req.user.id;
-
-  if (!userId || !amount || amount <= 0) {
-    const response = formatResponse(
-      false,
-      null,
-      "Valid user ID and amount are required",
-      400
-    );
-    return res.status(response.statusCode).json(response);
-  }
-
-  // Get user
-  const user = await User.findById(userId);
-  if (!user) {
-    const response = formatResponse(false, null, "User not found", 404);
-    return res.status(response.statusCode).json(response);
-  }
-
-  // Create admin transaction
-  const transaction = new Transaction({
-    userId,
-    paymentId: `ADMIN_DEPOSIT_${Date.now()}_${Math.random()
-      .toString(36)
-      .substring(7)
-      .toUpperCase()}`,
-    priceAmount: parseFloat(amount),
-    priceCurrency: "usd",
-    actuallyPaid: parseFloat(amount),
-    status: "finished",
-    transactionType: "admin_deposit",
-    adminOperation: "deposit",
-    adminNote: note || "Balance added by admin",
-    adminUserId,
-    description: `Admin deposit: ${note || "Manual balance addition"}`,
-    finishedAt: new Date(),
-  });
-
-  await transaction.save();
-
-  // Update user balance
-  user.balance += parseFloat(amount);
-  await user.save();
-
-  const response = formatResponse(
-    true,
-    {
-      newBalance: user.balance,
-      transaction,
-    },
-    "Balance added successfully"
-  );
-
-  res.status(response.statusCode).json(response);
-});
-
-// Admin: Deduct balance manually
-const deductBalance = asyncHandler(async (req, res) => {
-  const { userId, amount, note } = req.body;
-  const adminUserId = req.user.id;
-
-  if (!userId || !amount || amount <= 0) {
-    const response = formatResponse(
-      false,
-      null,
-      "Valid user ID and amount are required",
-      400
-    );
-    return res.status(response.statusCode).json(response);
-  }
-
-  // Get user
-  const user = await User.findById(userId);
-  if (!user) {
-    const response = formatResponse(false, null, "User not found", 404);
-    return res.status(response.statusCode).json(response);
-  }
-
-  if (user.balance < amount) {
-    const response = formatResponse(false, null, "Insufficient balance", 400);
-    return res.status(response.statusCode).json(response);
-  }
-
-  // Create admin transaction
-  const transaction = new Transaction({
-    userId,
-    paymentId: `ADMIN_DEDUCT_${Date.now()}_${Math.random()
-      .toString(36)
-      .substring(7)
-      .toUpperCase()}`,
-    priceAmount: parseFloat(amount),
-    priceCurrency: "usd",
-    actuallyPaid: parseFloat(amount),
-    status: "finished",
-    transactionType: "admin_deduction",
-    adminOperation: "deduction",
-    adminNote: note || "Balance deducted by admin",
-    adminUserId,
-    description: `Admin deduction: ${note || "Manual balance deduction"}`,
-    finishedAt: new Date(),
-  });
-
-  await transaction.save();
-
-  // Update user balance
-  user.balance -= parseFloat(amount);
-  await user.save();
-
-  const response = formatResponse(
-    true,
-    {
-      newBalance: user.balance,
-      transaction,
-    },
-    "Balance deducted successfully"
-  );
-
-  res.status(response.statusCode).json(response);
-});
-
-// System: Deduct balance for Forest Lookup API
-const deductBalanceForLookup = async (
-  userId,
-  amount,
-  lookupHistoryId,
-  description
-) => {
+const uploadPayments = async (req, res) => {
   try {
-    const user = await User.findById(userId);
-    if (!user || user.balance < amount) {
-      throw new Error("Insufficient balance");
+    if (!req.file) {
+      return res.status(400).json({ message: "Please upload a CSV file" });
     }
 
-    // Create system transaction
-    const transaction = new Transaction({
-      userId,
-      paymentId: `LOOKUP_${Date.now()}_${Math.random()
-        .toString(36)
-        .substring(7)
-        .toUpperCase()}`,
-      priceAmount: parseFloat(amount),
-      priceCurrency: "usd",
-      actuallyPaid: parseFloat(amount),
-      status: "finished",
-      transactionType: "system_deduction",
-      systemOperation: "lookup_deduction",
-      lookupHistoryId,
-      description: description || "Forest Lookup API charge",
-      finishedAt: new Date(),
+
+    await initializeMaturitySettings();
+    const maturitySettings = await MaturitySetting.find({});
+    const settingsMap = {};
+    maturitySettings.forEach(s => {
+      settingsMap[s.dayOfWeek] = s.offsetDays;
     });
 
-    await transaction.save();
+    const results = [];
+    const errors = [];
+    let processed = 0;
+    let matched = 0;
 
-    // Update user balance
-    user.balance -= parseFloat(amount);
-    await user.save();
+    let hasInvalidHeaders = false;
 
-    return { success: true, newBalance: user.balance, transaction };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-};
+    const stream = fs.createReadStream(req.file.path).pipe(csv());
 
-// ================================
-// NOWPAYMENTS INTEGRATION
-// ================================
+    stream.on('headers', (headers) => {
+      const lowerHeaders = headers.map(h => h.toLowerCase().trim());
+      const hasName = lowerHeaders.includes('name');
+      const hasAmount = lowerHeaders.includes('amount');
+      const hasDate = lowerHeaders.includes('date');
 
-// Get supported currencies
-const getAllCurrencies = asyncHandler(async (req, res) => {
-  try {
-    const config = {
-      method: "get",
-      url: "https://api.nowpayments.io/v1/merchant/coins",
-      headers: {
-        "x-api-key": NOWPAYMENT_API_KEY,
-      },
-    };
-
-    const response = await axios(config);
-    const apiResponse = formatResponse(
-      true,
-      response.data,
-      "Currencies fetched successfully"
-    );
-    res.status(apiResponse.statusCode).json(apiResponse);
-  } catch (error) {
-    console.error("Error fetching currencies:", error);
-    const response = formatResponse(
-      false,
-      null,
-      "Error fetching currencies",
-      400
-    );
-    res.status(response.statusCode).json(response);
-  }
-});
-
-// Get minimum payment amount
-const getMinimumAmount = asyncHandler(async (req, res) => {
-  const { crypto } = req.params;
-
-  if (!crypto) {
-    const response = formatResponse(
-      false,
-      null,
-      "Cryptocurrency is required",
-      400
-    );
-    return res.status(response.statusCode).json(response);
-  }
-
-  try {
-    const config = {
-      method: "get",
-      url: `https://api.nowpayments.io/v1/min-amount?currency_from=${crypto}&currency_to=usd&fiat_equivalent=usd&is_fee_paid_by_user=False`,
-      headers: {
-        "x-api-key": NOWPAYMENT_API_KEY,
-      },
-    };
-
-    const response = await axios(config);
-    const apiResponse = formatResponse(
-      true,
-      response.data,
-      "Minimum amount fetched successfully"
-    );
-    res.status(apiResponse.statusCode).json(apiResponse);
-  } catch (error) {
-    console.error("Error fetching minimum amount:", error);
-    const response = formatResponse(
-      false,
-      null,
-      "Error fetching minimum amount",
-      400
-    );
-    res.status(response.statusCode).json(response);
-  }
-});
-
-// Create payment request
-const createPayment = asyncHandler(async (req, res) => {
-  const { amount, cryptoCurrency, userId, description } = req.body;
-
-  const user = await User.findById(userId);
-
-  if (!user) {
-    const response = formatResponse(
-      false,
-      null,
-      "No user found",
-      404
-    );
-    return res.status(response.statusCode).json(response);
-  }
-
-  // Validate input
-  const validation = validatePaymentData({ amount, cryptoCurrency, userId });
-
-  if (!validation.isValid) {
-    const response = formatResponse(
-      false,
-      null,
-      validation.errors.join(", "),
-      400
-    );
-    return res.status(response.statusCode).json(response);
-  }
-
-  try {
-    // Create transaction record first to get the transaction ID
-    const transaction = new Transaction({
-      userId,
-      priceAmount: parseFloat(amount),
-      priceCurrency: "usd",
-      payCurrency: cryptoCurrency,
-      status: "waiting",
-      description: description || `Balance deposit by ${user.username}`,
-      remainingAmount: parseFloat(amount),
-      transactionType: "crypto_payment",
-      paymentId: generateUniqueString(),
+      if (!hasName || !hasAmount || !hasDate) {
+        hasInvalidHeaders = true;
+        // Destroy the stream to stop processing
+        stream.destroy(new Error('Invalid CSV Headers. Required headers: Name, Amount, Date'));
+      }
     });
 
-    await transaction.save();
-    const transactionId = transaction._id.toString();
+    stream.on('error', (error) => {
+      fs.unlink(req.file.path, (err) => { if (err) console.error(err) });
+      if (hasInvalidHeaders) {
+        return res.status(400).json({ message: error.message });
+      }
+      return res.status(500).json({ message: "Error reading CSV file", error: error.message });
+    });
 
-    const paymentData = {
-      price_amount: parseFloat(amount),
-      price_currency: "usd",
-      pay_currency: cryptoCurrency,
-      ipn_callback_url: `${API_DOMAIN}/api/payments/nowpayments/webhook`,
-      order_id: transactionId, // Use transaction ID as order ID
-      order_description: description || `Balance deposit by ${user?.email || ""}`,
-    };
+    stream.on('data', (data) => {
+      if (!hasInvalidHeaders) results.push(data);
+    });
 
-    const config = {
-      method: "post",
-      url: "https://api.nowpayments.io/v1/payment",
-      headers: {
-        "x-api-key": NOWPAYMENT_API_KEY,
-        "Content-Type": "application/json",
-      },
-      data: paymentData,
-    };
+    stream.on('end', async () => {
+      if (hasInvalidHeaders) return; // Response already sent in error handler
+        try {
+          for (const row of results) {
+            processed++;
+            // Assume CSV columns: Name, Amount, Date
+            const name = row.Name || row.name;
+            const amountRaw = row.Amount || row.amount;
+            const dateRaw = row.Date || row.date;
 
-    const response = await axios(config);
+            if (!name || !amountRaw || !dateRaw) {
+              errors.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw || '', reason: "Missing required fields" });
+              continue;
+            }
 
-    // Update transaction record with payment provider data
-    transaction.paymentId = response.data.payment_id;
-    transaction.purchaseId = response.data.purchase_id;
-    transaction.orderId = transactionId; // Set orderId to transaction ID
-    transaction.payAmount = response.data.pay_amount;
-    transaction.payAddress = response.data.pay_address;
-    transaction.network = response.data.network;
+            const amount = parseFloat(amountRaw.toString().replace(/,/g, ''));
+            if (isNaN(amount)) {
+              errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: "Invalid amount format" });
+              continue;
+            }
 
-    await transaction.save();
+            // Parse DD/MM/YYYY or YYYY-MM-DD
+            let paymentDate;
+            if (dateRaw.includes('/')) {
+              const parts = dateRaw.split('/');
+              if (parts.length === 3) {
+                // assume DD/MM/YYYY
+                paymentDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00Z`);
+              }
+            } else {
+              paymentDate = new Date(dateRaw);
+            }
 
-    const paymentDataResponse = {
-      pay_address: response?.data.pay_address,
-      price_amount: response?.data.price_amount,
-      price_currency: response?.data.price_currency,
-      amount_received: response?.data.amount_received,
-      pay_currency: response?.data.pay_currency,
-      network: response?.data.network,
-      order_id: response?.data.order_id,
-      pay_amount: response?.data.pay_amount,
-    };
+            if (isNaN(paymentDate.getTime())) {
+              errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: "Invalid date format" });
+              continue;
+            }
 
-    const apiResponse = formatResponse(
-      true,
-      {
-        paymentData: paymentDataResponse,
-        transactionId: transaction._id,
-        status: "waiting",
-      },
-      "Payment address generated successfully"
-    );
+            // Calculate maturity
+            const dayOfWeek = paymentDate.getUTCDay();
+            const offsetDays = settingsMap[dayOfWeek] || 2; // Default to 2 if missing
+            const maturityDate = new Date(paymentDate);
+            maturityDate.setUTCDate(maturityDate.getUTCDate() + offsetDays);
 
-    res.status(apiResponse.statusCode).json(apiResponse);
-  } catch (error) {
-    console.error("Error creating payment:", error);
-    const response = formatResponse(
-      false,
-      null,
-      "Failed to create payment request",
-      400
-    );
-    res.status(response.statusCode).json(response);
-  }
-});
+            const payoutName = await PayoutName.findOne({ nameLower: name.toString().toLowerCase() });
+            
+            if (payoutName) {
+              if (payoutName.status !== 'claimed') {
+                errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: `Payout name is not claimed (Current status: ${payoutName.status})` });
+              } else {
+                if (payoutName.paymentStatus === 'received' || payoutName.paymentStatus === 'matured') {
+                  // Accumulate amount and use latest maturity date
+                  payoutName.amount = (payoutName.amount || 0) + amount;
+                  if (!payoutName.maturityDate || maturityDate > payoutName.maturityDate) {
+                    payoutName.maturityDate = maturityDate;
+                    payoutName.paymentReceivedDate = paymentDate;
+                  }
+                  payoutName.paymentStatus = 'received'; // Reverts to received until new amount matures
+                } else {
+                  // Either paid or not_received, start fresh
+                  payoutName.amount = amount;
+                  payoutName.paymentReceivedDate = paymentDate;
+                  payoutName.maturityDate = maturityDate;
+                  payoutName.paymentStatus = 'received';
+                }
+                await payoutName.save();
+                
+                // Create notification and increment totalReceivedUSD for the client
+                if (payoutName.allocatedTo) {
+                  const User = require('../models/User');
+                  await User.findByIdAndUpdate(payoutName.allocatedTo, {
+                    $inc: { totalReceivedUSD: amount }
+                  });
+                  
+                  await Notification.create({
+                    recipient: payoutName.allocatedTo,
+                    type: 'deposit',
+                    title: 'Payment Received',
+                    message: `A payment of $${amount} was received for payout name ${payoutName.name}.`,
+                    link: '/client/payout-names'
+                  });
+                }
+                
+                matched++;
+              }
+            } else {
+              errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: "Payout name not found in database" });
+            }
+          }
 
-// NOWPayments webhook handler
-const handleNowPaymentsWebhook = asyncHandler(async (req, res) => {
-  console.log("NOWPayments webhook received:", req.body);
+          // Cleanup file
+          fs.unlink(req.file.path, (err) => {
+            if (err) console.error("Failed to delete temp file:", err);
+          });
 
-  try {
-    const {
-      payment_id,
-      payment_status,
-      order_id: transactionId, // Now this is the transaction ID
-      purchase_id,
-      price_amount,
-      pay_amount,
-      actually_paid,
-      pay_currency,
-      pay_address,
-      payin_hash,
-      payout_hash,
-      network,
-      order_description,
-    } = req.body;
+          // Save history
+          const history = await PaymentUploadHistory.create({
+            uploadedBy: req.user.id,
+            fileName: req.file.originalname,
+            totalProcessed: processed,
+            totalMatched: matched,
+            errors: errors
+          });
 
-    // Find transaction by orderId (which is now the transaction ID)
-    const transaction = await Transaction.findById(transactionId);
+          res.status(200).json({
+            success: true,
+            message: `Processed ${processed} records. Matched and updated ${matched}.`,
+            errors: errors.length > 0 ? errors : undefined,
+            matchedCount: matched,
+            historyId: history._id
+          });
 
-    if (!transaction) {
-      console.error("Transaction not found for orderId:", transactionId);
-      return res.status(404).json({ message: "Transaction not found" });
-    }
-
-    if (transaction.status === "finished") {
-      console.log("Transaction already completed:", transactionId);
-      return res.status(200).json({ message: "Transaction already completed" });
-    }
-
-    const user = await User.findById(transaction.userId);
-
-    if (!user) {
-      console.error("User not found for userId:", transaction.userId);
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Update transaction based on status
-    transaction.status = payment_status;
-    transaction.actuallyPaid = parseFloat(actually_paid || 0);
-    transaction.payinHash = payin_hash;
-    transaction.payoutHash = payout_hash;
-    transaction.updatedAt = new Date();
-
-    // Calculate remaining amount
-    transaction.remainingAmount = calculateRemainingAmount(
-      transaction.priceAmount,
-      actually_paid
-    );
-    transaction.isPartialPayment =
-      transaction.remainingAmount > 0 && parseFloat(actually_paid || 0) > 0;
-
-    // Handle different payment statuses
-    switch (payment_status) {
-      case "waiting":
-        // Payment is waiting for customer to send payment
-        break;
-
-      case "confirming":
-        // Payment is being confirmed on blockchain
-        transaction.amountReceived = parseFloat(actually_paid || 0);
-        break;
-
-      case "confirmed":
-        // Payment confirmed on blockchain
-        transaction.amountReceived = parseFloat(actually_paid || 0);
-        break;
-
-      case "sending":
-        // Funds being sent to merchant account
-        transaction.amountReceived = parseFloat(actually_paid || 0);
-        break;
-
-      case "partially_paid":
-        // Payment was partially paid
-        transaction.amountReceived = parseFloat(actually_paid || 0);
-        transaction.isPartialPayment = true;
-
-        console.log(
-          `Partial payment received: ${actually_paid}/${price_amount} for transaction ${transactionId}`
-        );
-        break;
-
-      case "finished":
-        // Payment completed successfully
-        transaction.finishedAt = new Date();
-        transaction.amountReceived = parseFloat(price_amount || 0);
-
-        // Add balance to user
-        const amountToAdd = parseFloat(price_amount);
-        user.balance += amountToAdd;
-        await user.save();
-
-        console.log(
-          `Payment completed: ${amountToAdd} added to user ${transaction.userId} for transaction ${transactionId}`
-        );
-        break;
-
-      case "failed":
-      case "expired":
-        // Payment failed or expired
-        transaction.amountReceived = 0;
-        console.log(
-          `Payment ${payment_status} for transaction ${transactionId}`
-        );
-        break;
-
-      case "refunded":
-        // Payment was refunded
-        transaction.amountReceived = 0;
-        const refundAmount = parseFloat(actually_paid || 0);
-
-        if (refundAmount > 0) {
-          // Add refunded amount back to user balance
-          user.balance += refundAmount;
-          await user.save();
+        } catch (error) {
+          console.error("Error processing CSV:", error);
+          res.status(500).json({ message: "Error processing CSV data", error: error.message });
         }
+      });
+  } catch (error) {
+    console.error("Upload error:", error);
+    res.status(500).json({ message: "Server error during upload", error: error.message });
+  }
+};
 
-        console.log(
-          `Payment refunded: ${refundAmount} for transaction ${transactionId}`
-        );
-        break;
+const getMaturitySettings = async (req, res) => {
+  try {
+    await initializeMaturitySettings();
+    const settings = await MaturitySetting.find({}).sort({ dayOfWeek: 1 });
+    res.status(200).json({ success: true, data: settings });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
 
-      default:
-        console.log(`Unknown payment status: ${payment_status}`);
+const updateMaturitySettings = async (req, res) => {
+  try {
+    const { settings } = req.body; // Array of { _id, offsetDays }
+    if (!Array.isArray(settings)) {
+      return res.status(400).json({ message: "Settings must be an array" });
     }
 
-    // Save updated transaction
-    await transaction.save();
+    for (const setting of settings) {
+      if (setting._id && setting.offsetDays !== undefined) {
+        await MaturitySetting.findByIdAndUpdate(setting._id, { offsetDays: setting.offsetDays });
+      }
+    }
 
-    const response = formatResponse(
-      true,
-      {
-        status: payment_status,
-      },
-      "Webhook processed successfully"
-    );
-
-    res.status(response.statusCode).json(response);
+    res.status(200).json({ success: true, message: "Settings updated successfully" });
   } catch (error) {
-    console.error("Webhook processing error:", error);
-    const response = formatResponse(
-      false,
-      null,
-      "Webhook processing failed",
-      500
-    );
-    res.status(response.statusCode).json(response);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-});
+};
 
-// Get payment status (for frontend polling)
-const getPaymentStatus = asyncHandler(async (req, res) => {
-  const { userId, transactionId } = req.params;
-
-  // Verify user exists
-  const user = await User.findById(userId);
-  if (!user) {
-    const response = formatResponse(false, null, "User not found", 404);
-    return res.status(response.statusCode).json(response);
+const getUploadHistories = async (req, res) => {
+  try {
+    const histories = await PaymentUploadHistory.find({})
+      .populate('uploadedBy', 'name email')
+      .sort({ createdAt: -1 });
+    res.status(200).json({ success: true, data: histories });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
   }
+};
 
-  const transaction = await Transaction.findOne({
-    $or: [
-      { _id: transactionId, userId },
-      { paymentId: transactionId, userId },
-    ],
-  });
+const downloadUploadReport = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const history = await PaymentUploadHistory.findById(id);
+    if (!history) {
+      return res.status(404).json({ message: "History not found" });
+    }
 
-  if (!transaction) {
-    const response = formatResponse(false, null, "Transaction not found", 404);
-    return res.status(response.statusCode).json(response);
+    if (!history.errors || history.errors.length === 0) {
+      return res.status(400).json({ message: "No errors in this upload to download" });
+    }
+
+    const csvStringifier = createObjectCsvStringifier({
+      header: [
+        { id: 'rowNum', title: 'Row Number' },
+        { id: 'name', title: 'Name' },
+        { id: 'amount', title: 'Amount' },
+        { id: 'date', title: 'Date' },
+        { id: 'reason', title: 'Error Reason' }
+      ]
+    });
+
+    const header = csvStringifier.getHeaderString();
+    const records = csvStringifier.stringifyRecords(history.errors);
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="upload_errors_${history._id}.csv"`);
+    res.send(header + records);
+
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
   }
-
-  const response = formatResponse(true, {
-    status: transaction.status,
-    amountReceived: transaction.amountReceived,
-    remainingAmount: transaction.remainingAmount,
-    isPartialPayment: transaction.isPartialPayment,
-    priceAmount: transaction.priceAmount,
-    actuallyPaid: transaction.actuallyPaid,
-    payAddress: transaction.payAddress,
-    payCurrency: transaction.payCurrency,
-    createdAt: transaction.createdAt,
-    updatedAt: transaction.updatedAt,
-    finishedAt: transaction.finishedAt,
-    userBalance: user.balance,
-  });
-
-  res.status(response.statusCode).json(response);
-});
+};
 
 module.exports = {
-  // Transaction management
-  getUserTransactions,
-  getTransaction,
-  addBalance,
-  deductBalance,
-  deductBalanceForLookup, // For use by Forest Lookup API
-
-  // NOWPayments integration
-  getAllCurrencies,
-  getMinimumAmount,
-  createPayment,
-  handleNowPaymentsWebhook,
-  getPaymentStatus,
+  uploadPayments,
+  getMaturitySettings,
+  updateMaturitySettings,
+  getUploadHistories,
+  downloadUploadReport
 };

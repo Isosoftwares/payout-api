@@ -36,6 +36,16 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  usdBuyPrice: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  usdSellPrice: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
   profile: {
     firstName: String,
     lastName: String,
@@ -61,6 +71,28 @@ const userSchema = new mongoose.Schema({
       default: Date.now
     }
   }],
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null
+  },
+  // Lifetime Accumulators
+  totalReceivedUSD: {
+    type: Number,
+    default: 0
+  },
+  totalPaidUSD: {
+    type: Number,
+    default: 0
+  },
+  totalProfitUSD: {
+    type: Number,
+    default: 0
+  },
+  totalFeesUSD: {
+    type: Number,
+    default: 0
+  },
   createdAt: {
     type: Date,
     default: Date.now,

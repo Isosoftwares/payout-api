@@ -38,5 +38,6 @@ router.patch('/payment-methods/:methodId/default', authenticateToken, isAuthenti
 // CLIENT BALANCE ROUTES
 // ================================
 router.get('/balance', authenticateToken, isClient, userController.getOwnBalance);
+router.get('/dashboard/stats', authenticateToken, isClient, userController.getClientDashboardStats);
 
 module.exports = router;

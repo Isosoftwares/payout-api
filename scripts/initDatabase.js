@@ -31,7 +31,7 @@ const initializeDatabase = async () => {
 
 // Create default admin user
 const createDefaultAdmin = async () => {
-  const adminEmail = process.env.DEFAULT_ADMIN_EMAIL || 'admin@forestlookup.com';
+  const adminEmail = process.env.DEFAULT_ADMIN_EMAIL || 'admin@gmail.com';
   const adminPassword = process.env.DEFAULT_ADMIN_PASSWORD || 'admin123!';
   
   const existingAdmin = await User.findOne({ email: adminEmail });
