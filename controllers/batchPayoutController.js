@@ -213,11 +213,40 @@ const getAllTransactions = async (req, res) => {
   }
 };
 
+const getClientTransactions = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    
+    const query = { clientId: req.user.id };
+    
+    const total = await PayoutTransaction.countDocuments(query);
+    const transactions = await PayoutTransaction.find(query)
+      .populate('adminId', 'firstName lastName')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+      
+    res.status(200).json({
+      success: true,
+      data: {
+        data: transactions,
+        total,
+        page,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
 module.exports = {
   getAdmins,
   getClientsByAdmin,
   getClientMaturedNames,
   getAdminMaturedStats,
   executeBatchPayout,
-  getAllTransactions
+  getAllTransactions,
+  getClientTransactions
 };

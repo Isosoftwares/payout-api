@@ -226,7 +226,7 @@ const updateMaturitySettings = async (req, res) => {
 const getUploadHistories = async (req, res) => {
   try {
     const histories = await PaymentUploadHistory.find({})
-      .populate('uploadedBy', 'name email')
+      .populate('uploadedBy', 'profile email')
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, data: histories });
   } catch (error) {
