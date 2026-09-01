@@ -1,8 +1,8 @@
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://api.851payss.com",
-  "https://www.851payss.com",
-  "https://851payss.com",
+  "https://api.sheetresolve.com",
+  "https://www.sheetresolve.com",
+  "https://sheetresolve.com",
 ];
 
 module.exports = allowedOrigins;
