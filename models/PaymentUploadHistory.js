@@ -27,6 +27,7 @@ const paymentUploadHistorySchema = new mongoose.Schema({
   }]
 },{
   timestamps: true,
+  suppressReservedKeysWarning: true
 });
 
 module.exports = mongoose.model("PaymentUploadHistory", paymentUploadHistorySchema);

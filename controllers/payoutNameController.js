@@ -344,7 +344,7 @@ const getMyInventory = async (req, res) => {
       allocatedTo: clientId
     });
 
-    const { search } = req.query;
+    const { search, subaccount } = req.query;
     
     let filter = {
       status: 'claimed',
@@ -356,6 +356,14 @@ const getMyInventory = async (req, res) => {
         { name: { $regex: search, $options: 'i' } },
         { accountNumber: { $regex: search, $options: 'i' } }
       ];
+    }
+
+    if (subaccount) {
+      if (subaccount === 'self') {
+        filter.claimedForSubaccount = null;
+      } else {
+        filter.claimedForSubaccount = subaccount;
+      }
     }
 
     const claimedNames = await PayoutName.find(filter)
