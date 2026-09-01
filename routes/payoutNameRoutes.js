@@ -13,7 +13,8 @@ const {
   unassignNamesFromClient,
   getMyInventory,
   claimPayoutNames,
-  getSubaccountInventory
+  getSubaccountInventory,
+  deletePayoutName
 } = require("../controllers/payoutNameController");
 const { authenticateToken, isAdmin, isClient } = require("../middleware/auth");
 const fs = require("fs");
@@ -52,6 +53,7 @@ router.post("/assign", authenticateToken, isAdmin, assignNamesToClient);
 router.post("/unassign", authenticateToken, isAdmin, unassignNamesFromClient);
 router.get("/requests", authenticateToken, isAdmin, getAllAllocationRequests);
 router.put("/requests/:id", authenticateToken, isAdmin, updateAllocationRequest);
+router.delete("/:id", authenticateToken, isAdmin, deletePayoutName);
 
 // Client Routes
 router.post("/request", authenticateToken, isClient, createAllocationRequest);

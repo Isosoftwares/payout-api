@@ -46,10 +46,15 @@ const uploadPayoutNames = async (req, res) => {
 
           try {
             // Check for existing
-            const existing = await PayoutName.findOne({ nameLower });
+            const existing = await PayoutName.findOne({ 
+              $or: [
+                { nameLower },
+                { accountNumber }
+              ]
+            });
             if (existing) {
               duplicates++;
-              errors.push(`Duplicate name found in database: '${name}'`);
+              errors.push(`Duplicate name or account number found in database: '${name}' / '${accountNumber}'`);
               continue;
             }
 
@@ -461,6 +466,24 @@ const getSubaccountInventory = async (req, res) => {
   }
 };
 
+// @desc    Delete a Payout Name
+// @route   DELETE /api/payout-names/:id
+// @access  Private/Admin
+const deletePayoutName = async (req, res) => {
+  try {
+    const payoutName = await PayoutName.findById(req.params.id);
+    
+    if (!payoutName) {
+      return res.status(404).json({ message: "Payout name not found" });
+    }
+    
+    await payoutName.deleteOne();
+    res.status(200).json({ message: "Payout name deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
 module.exports = {
   uploadPayoutNames,
   getPayoutNames,
@@ -472,5 +495,6 @@ module.exports = {
   unassignNamesFromClient,
   getMyInventory,
   claimPayoutNames,
-  getSubaccountInventory
+  getSubaccountInventory,
+  deletePayoutName
 };

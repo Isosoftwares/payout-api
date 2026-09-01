@@ -18,7 +18,8 @@ const payoutNameSchema = new mongoose.Schema({
   },
   accountNumber: { 
     type: String, 
-    required: true 
+    required: true,
+    unique: true
   },
   status: {
     type: String,
