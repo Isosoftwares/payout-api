@@ -9,7 +9,7 @@ const corsOptions = require('./config/corsOptions')
 const connectDB = require('./config/dbConn')
 const mongoose = require('mongoose')
 // Cron job will be started after DB connection
-const { startCron } = require('./cron');
+const { startCron, checkMaturity } = require('./cron');
 
 const PORT = process.env.PORT || 3500
 const allowedOrigins = require('./config/allowedOrigins')
@@ -70,6 +70,9 @@ mongoose.connection.once('open', () => {
   startCron();
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`))
 })
+
+// cron test
+checkMaturity()
 
 mongoose.connection.on('error', (err) => {
   console.log(err)

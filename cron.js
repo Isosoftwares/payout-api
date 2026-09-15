@@ -30,4 +30,4 @@ const startCron = () => {
   setInterval(checkMaturity, 1000 * 60 * 60);
 };
 
-module.exports = { startCron };
+module.exports = { startCron, checkMaturity };
