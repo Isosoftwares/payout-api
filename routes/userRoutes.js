@@ -21,7 +21,10 @@ router.get('/admin/users/statistics', authenticateToken, isAdmin, userController
 router.get('/:id', authenticateToken, isAdmin, userController.getUserById);
 router.post('/admin/users', authenticateToken, isAdmin, userController.createUser);
 router.patch('/:id', authenticateToken, isAdmin, userController.updateUser);
+router.delete('/:id', authenticateToken, isAdmin, userController.deleteUser);
 router.delete('/admin/users/:id', authenticateToken, isAdmin, userController.deleteUser);
+router.post('/:id/reset-password', authenticateToken, isAdmin, userController.resetUserPassword);
+router.post('/:id/toggle-suspend', authenticateToken, isAdmin, userController.toggleSuspendUser);
 router.post('/:id/add-balance', authenticateToken, isAdmin, userController.addBalance);
 
 // ================================

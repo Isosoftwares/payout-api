@@ -302,7 +302,7 @@ const updateUser = asyncHandler(async (req, res) => {
   res.status(response.statusCode).json(response);
 });
 
-// Delete user (soft delete)
+// Delete user with guardrails for payout names
 const deleteUser = asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id);
   
@@ -319,11 +319,98 @@ const deleteUser = asyncHandler(async (req, res) => {
       return res.status(response.statusCode).json(response);
     }
   }
+
+  const PayoutName = require('../models/PayoutName');
+
+  // Guardrail 1: Claimed names check
+  const claimedCount = await PayoutName.countDocuments({
+    allocatedTo: user._id,
+    status: 'claimed'
+  });
+  if (claimedCount > 0) {
+    const response = formatResponse(
+      false, 
+      null, 
+      `Client cannot be deleted because they have ${claimedCount} claimed payout name(s). Clients with claimed names cannot be deleted, but can be suspended.`, 
+      400
+    );
+    return res.status(response.statusCode).json(response);
+  }
+
+  // Guardrail 2: Allocated (unclaimed) names check
+  const allocatedCount = await PayoutName.countDocuments({
+    allocatedTo: user._id,
+    status: 'allocated'
+  });
+  if (allocatedCount > 0) {
+    const response = formatResponse(
+      false, 
+      null, 
+      `Client cannot be deleted because they have ${allocatedCount} allocated payout name(s). All allocated names must be de-allocated before deleting this client.`, 
+      400
+    );
+    return res.status(response.statusCode).json(response);
+  }
+
+  // Safe to delete: clean up client subaccounts and requests
+  const Subaccount = require('../models/Subaccount');
+  const AllocationRequest = require('../models/AllocationRequest');
+  const SpecificNameRequest = require('../models/SpecificNameRequest');
+
+  await Subaccount.deleteMany({ clientId: user._id });
+  await AllocationRequest.deleteMany({ client: user._id });
+  await SpecificNameRequest.deleteMany({ client: user._id });
+  await user.deleteOne();
   
-  user.isActive = false;
+  const response = formatResponse(true, null, 'Client and associated records deleted successfully');
+  res.status(response.statusCode).json(response);
+});
+
+// Admin resets client password to 123456
+const resetUserPassword = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) {
+    const response = formatResponse(false, null, 'User not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const hashedPassword = await bcrypt.hash('123456', 12);
+  user.password = hashedPassword;
+  user.mustChangePassword = true;
   await user.save();
-  
-  const response = formatResponse(true, null, 'User deleted successfully');
+
+  const response = formatResponse(true, null, 'Client password has been reset to 123456');
+  res.status(response.statusCode).json(response);
+});
+
+// Admin toggles suspension of client
+const toggleSuspendUser = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) {
+    const response = formatResponse(false, null, 'User not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  if (user.role === 'admin') {
+    const adminCount = await User.countDocuments({ role: 'admin', isActive: true });
+    if (adminCount <= 1 && user.isActive) {
+      const response = formatResponse(false, null, 'Cannot suspend the last active admin', 400);
+      return res.status(response.statusCode).json(response);
+    }
+  }
+
+  // Toggle suspension state
+  const willBeSuspended = user.isSuspended ? false : true;
+  user.isSuspended = willBeSuspended;
+  user.isActive = !willBeSuspended;
+  await user.save();
+
+  const actionText = willBeSuspended ? 'suspended' : 'activated';
+  const response = formatResponse(
+    true, 
+    { isActive: user.isActive, isSuspended: user.isSuspended }, 
+    `Client has been ${actionText} successfully`
+  );
   res.status(response.statusCode).json(response);
 });
 
@@ -670,6 +757,8 @@ module.exports = {
   createUser,
   updateUser,
   deleteUser,
+  resetUserPassword,
+  toggleSuspendUser,
   addBalance,
   getUserStatistics,
   

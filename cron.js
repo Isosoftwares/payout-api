@@ -5,6 +5,7 @@ const checkMaturity = async () => {
   try {
     const today = new Date();
     // find all payments that have status received and maturityDate <= today
+    console.log("running cron")
     const result = await PayoutName.updateMany(
       { 
         paymentStatus: 'received',
@@ -16,6 +17,8 @@ const checkMaturity = async () => {
     );
     if (result.modifiedCount > 0) {
       console.log(`[Cron] Marked ${result.modifiedCount} payout names as matured.`);
+    } else {
+      console.log("[Cron] No payout names to mark as matured.");
     }
   } catch (error) {
     console.error("[Cron] Error checking maturity:", error);

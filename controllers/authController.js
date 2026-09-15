@@ -92,9 +92,15 @@ const login = asyncHandler(async (req, res) => {
     return res.status(response.statusCode).json(response);
   }
 
-  if (!isSubaccount && !user.isActive) {
-    const response = formatResponse(false, null, 'Account is deactivated', 403);
-    return res.status(response.statusCode).json(response);
+  if (!isSubaccount) {
+    if (user.isSuspended) {
+      const response = formatResponse(false, null, 'Account is suspended. Please contact administrator.', 403);
+      return res.status(response.statusCode).json(response);
+    }
+    if (!user.isActive) {
+      const response = formatResponse(false, null, 'Account is deactivated', 403);
+      return res.status(response.statusCode).json(response);
+    }
   }
   
   // Verify password
