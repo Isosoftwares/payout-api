@@ -2,6 +2,7 @@ const PayoutTransaction = require('../models/PayoutTransaction');
 const PayoutName = require('../models/PayoutName');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const telegramService = require('../services/telegramService');
 // Note: PaymentMethod is referenced, but we might just log the ID.
 
 const getAdmins = async (req, res) => {
@@ -180,6 +181,18 @@ const executeBatchPayout = async (req, res) => {
       message: `A batch payout of $${grossAmountUSD.toFixed(2)} was successfully processed.`,
       link: '/client/payouts'
     });
+
+    const batchTeleMsg = telegramService.formatNotification({
+      icon: "💸",
+      title: "Batch Payout Processed",
+      message: `A batch payout of <b>$${grossAmountUSD.toFixed(2)}</b> has been processed successfully.`,
+      details: [
+        { label: "Gross Amount", value: `$${grossAmountUSD.toFixed(2)}` },
+        { label: "Fee Deducted", value: `$${feeAmountUSD.toFixed(2)}` },
+        { label: "Net Payout", value: `$${netAmountUSD.toFixed(2)}` },
+      ]
+    });
+    telegramService.sendToUser(clientId, batchTeleMsg).catch(() => {});
 
     res.status(200).json({
       success: true,

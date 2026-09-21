@@ -16,9 +16,22 @@ const formatResponse = (success, data, message = null, statusCode = 200) => ({
 
 // @desc    Create a new subaccount
 // @route   POST /api/subaccounts
-// @access  Private (Client)
+// @access  Private (Client / Admin)
 const createSubaccount = asyncHandler(async (req, res) => {
-  const clientId = req.user.id;
+  let clientId = req.user.id;
+  if (req.user.role === 'admin') {
+    if (!req.body.clientId) {
+      const response = formatResponse(false, null, 'Client ID is required when creating a subaccount as admin', 400);
+      return res.status(response.statusCode).json(response);
+    }
+    const clientUser = await User.findById(req.body.clientId);
+    if (!clientUser) {
+      const response = formatResponse(false, null, 'Client not found', 404);
+      return res.status(response.statusCode).json(response);
+    }
+    clientId = req.body.clientId;
+  }
+
   const { username, password } = req.body;
 
   if (!username || !password) {
@@ -65,23 +78,42 @@ const createSubaccount = asyncHandler(async (req, res) => {
 
 // @desc    Get all subaccounts for a client
 // @route   GET /api/subaccounts
-// @access  Private (Client)
+// @access  Private (Client / Admin)
 const getSubaccounts = asyncHandler(async (req, res) => {
-  const clientId = req.user.id;
+  let clientId = req.user.id;
+  if (req.user.role === 'admin' && req.query.clientId) {
+    clientId = req.query.clientId;
+  }
 
   const subaccounts = await Subaccount.find({ clientId }).select('-password').sort({ createdAt: -1 });
 
-  const response = formatResponse(true, subaccounts);
+  const subaccountsWithCounts = await Promise.all(
+    subaccounts.map(async (sub) => {
+      const claimedCount = await PayoutName.countDocuments({
+        claimedForSubaccount: sub._id,
+        status: 'claimed'
+      });
+      const subObj = sub.toObject();
+      subObj.claimedCount = claimedCount;
+      return subObj;
+    })
+  );
+
+  const response = formatResponse(true, subaccountsWithCounts);
   res.status(response.statusCode).json(response);
 });
 
 // @desc    Delete a subaccount
 // @route   DELETE /api/subaccounts/:id
-// @access  Private (Client)
+// @access  Private (Client / Admin)
 const deleteSubaccount = asyncHandler(async (req, res) => {
-  const clientId = req.user.id;
-  
-  const subaccount = await Subaccount.findOne({ _id: req.params.id, clientId });
+  let subaccount;
+  if (req.user.role === 'admin') {
+    subaccount = await Subaccount.findById(req.params.id);
+  } else {
+    subaccount = await Subaccount.findOne({ _id: req.params.id, clientId: req.user.id });
+  }
+
   if (!subaccount) {
     const response = formatResponse(false, null, 'Subaccount not found', 404);
     return res.status(response.statusCode).json(response);
@@ -89,7 +121,7 @@ const deleteSubaccount = asyncHandler(async (req, res) => {
 
   await subaccount.deleteOne();
   
-  // Optional: We might want to un-assign the claimed names or re-assign them to "self"
+  // Reset claimed names assigned to this subaccount back to "self" (null)
   await PayoutName.updateMany(
     { claimedForSubaccount: subaccount._id },
     { $set: { claimedForSubaccount: null } }

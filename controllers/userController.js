@@ -290,6 +290,14 @@ const updateUser = asyncHandler(async (req, res) => {
     req.body.password = await bcrypt.hash(req.body.password, 12);
   }
   
+  if (req.body.telegramUsername !== undefined) {
+    let cleanUsername = (req.body.telegramUsername || '').trim();
+    if (cleanUsername.startsWith('@')) {
+      cleanUsername = cleanUsername.substring(1);
+    }
+    req.body.telegramUsername = cleanUsername || null;
+  }
+
   // Update user
   Object.assign(user, req.body);
   await user.save();
@@ -515,13 +523,26 @@ const updateOwnProfile = asyncHandler(async (req, res) => {
     return res.status(response.statusCode).json(response);
   }
   
-  // Only allow updating specific fields
-  const allowedFields = ['profile.firstName', 'profile.lastName', 'profile.phone', 'profile.company'];
   const updateData = {};
   
   // Handle nested profile updates
   if (req.body.profile) {
     updateData.profile = { ...user.profile, ...req.body.profile };
+  }
+
+  // Handle Telegram username
+  if (req.body.telegramUsername !== undefined) {
+    let cleanUsername = (req.body.telegramUsername || '').trim();
+    if (cleanUsername.startsWith('@')) {
+      cleanUsername = cleanUsername.substring(1);
+    }
+    updateData.telegramUsername = cleanUsername || null;
+    // If username changed and not empty, but chat ID not yet connected, user will connect via bot
+  }
+
+  // Handle Telegram notification toggle
+  if (req.body.telegramNotificationsEnabled !== undefined) {
+    updateData.telegramNotificationsEnabled = Boolean(req.body.telegramNotificationsEnabled);
   }
   
   // Update user
@@ -534,6 +555,35 @@ const updateOwnProfile = asyncHandler(async (req, res) => {
   
   const response = formatResponse(true, userResponse, 'Profile updated successfully');
   res.status(response.statusCode).json(response);
+});
+
+// Get Telegram Bot Info and Connection Status
+const getTelegramBotInfo = asyncHandler(async (req, res) => {
+  const telegramService = require('../services/telegramService');
+  const user = await User.findById(req.user.id).select('telegramUsername telegramChatId telegramNotificationsEnabled');
+  
+  const botUsername = telegramService.botUsername || process.env.TELEGRAM_BOT_USERNAME || null;
+  const isConfigured = Boolean(process.env.TELEGRAM_BOT_TOKEN);
+
+  res.status(200).json(formatResponse(true, {
+    botUsername,
+    isConfigured,
+    telegramUsername: user?.telegramUsername || null,
+    isConnected: Boolean(user?.telegramChatId),
+    telegramNotificationsEnabled: user?.telegramNotificationsEnabled !== false,
+    connectUrl: botUsername ? `https://t.me/${botUsername}?start=${req.user.id}` : null
+  }));
+});
+
+// Send Test Telegram Notification
+const testTelegramNotification = asyncHandler(async (req, res) => {
+  const telegramService = require('../services/telegramService');
+  try {
+    await telegramService.sendTestMessage(req.user.id);
+    res.status(200).json(formatResponse(true, null, 'Test notification sent successfully to your Telegram!'));
+  } catch (error) {
+    res.status(400).json(formatResponse(false, null, error.message || 'Failed to send test notification', 400));
+  }
 });
 
 // Get own balance (for clients)
@@ -770,5 +820,7 @@ module.exports = {
   deletePaymentMethod,
   editPaymentMethod,
   setDefaultPaymentMethod,
-  getClientDashboardStats
+  getClientDashboardStats,
+  getTelegramBotInfo,
+  testTelegramNotification
 };

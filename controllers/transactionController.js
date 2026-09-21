@@ -4,6 +4,7 @@ const PayoutRequest = require('../models/PayoutRequest');
 const FeeLog = require('../models/FeeLog');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const telegramService = require('../services/telegramService');
 
 const formatResponse = (success, data, message = null, statusCode = 200) => ({
   success, data, message, statusCode
@@ -58,6 +59,19 @@ const recordDeposit = async (req, res) => {
       title: 'New Deposit Received',
       message: `A deposit of $${parsedGrossAmount.toFixed(2)} was recorded for ${account.firstName} ${account.lastName}.`
     });
+
+    // Notify client via Telegram
+    const depositTeleMsg = telegramService.formatNotification({
+      icon: "💳",
+      title: "New Deposit Received",
+      message: `A deposit of <b>$${parsedGrossAmount.toFixed(2)}</b> was recorded for <b>${account.firstName} ${account.lastName}</b>.`,
+      details: [
+        { label: "Gross Amount", value: `$${parsedGrossAmount.toFixed(2)}` },
+        { label: "Net Amount", value: `$${netAmount.toFixed(2)}` },
+        { label: "Subaccount", value: `${account.firstName} ${account.lastName}` }
+      ]
+    });
+    telegramService.sendToUser(account.client._id || account.client, depositTeleMsg).catch(() => {});
     
     res.status(201).json(formatResponse(true, transaction, 'Deposit recorded successfully', 201));
   } catch (error) {
@@ -85,6 +99,25 @@ const createPayoutRequest = async (req, res) => {
       amount
     });
     await payoutRequest.save();
+
+    // Broadcast to all admins via Telegram
+    User.findById(account.client).select('email profile').then(clientUser => {
+      const clientName = clientUser?.profile?.firstName 
+        ? `${clientUser.profile.firstName} ${clientUser.profile.lastName || ''}`.trim() 
+        : (clientUser?.email || 'A client');
+
+      const adminTeleMsg = telegramService.formatNotification({
+        icon: "🔔",
+        title: "New Payout Request",
+        message: `Client <b>${clientName}</b> has requested a payout of <b>$${parseFloat(amount).toFixed(2)}</b>.`,
+        details: [
+          { label: "Client", value: `${clientName} (${clientUser?.email || ''})` },
+          { label: "Amount", value: `$${parseFloat(amount).toFixed(2)}` },
+          { label: "Subaccount", value: `${account.firstName} ${account.lastName}` }
+        ]
+      });
+      telegramService.sendToAdmins(adminTeleMsg).catch(() => {});
+    }).catch(() => {});
     
     res.status(201).json(formatResponse(true, payoutRequest, 'Payout requested successfully', 201));
   } catch (error) {
@@ -190,6 +223,19 @@ const recordPayout = async (req, res) => {
       title: 'Payout Processed',
       message: `A payout of $${parsedAmount.toFixed(2)} was completed for ${account.firstName} ${account.lastName}.`
     });
+
+    // Notify client via Telegram
+    const payoutTeleMsg = telegramService.formatNotification({
+      icon: "💸",
+      title: "Payout Completed",
+      message: `A payout of <b>$${parsedAmount.toFixed(2)}</b> has been processed for <b>${account.firstName} ${account.lastName}</b>.`,
+      details: [
+        { label: "Amount", value: `$${parsedAmount.toFixed(2)}` },
+        { label: "Subaccount", value: `${account.firstName} ${account.lastName}` },
+        { label: "Status", value: "Completed" }
+      ]
+    });
+    telegramService.sendToUser(account.client, payoutTeleMsg).catch(() => {});
     
     res.status(201).json(formatResponse(true, transaction, 'Payout recorded successfully', 201));
   } catch (error) {

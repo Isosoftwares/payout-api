@@ -56,6 +56,19 @@ const userSchema = new mongoose.Schema({
     phone: String,
     company: String,
   },
+  telegramUsername: {
+    type: String,
+    trim: true,
+    default: null,
+  },
+  telegramChatId: {
+    type: String,
+    default: null,
+  },
+  telegramNotificationsEnabled: {
+    type: Boolean,
+    default: true,
+  },
   paymentMethods: [{
     type: {
       type: String,

@@ -32,6 +32,8 @@ router.post('/:id/add-balance', authenticateToken, isAdmin, userController.addBa
 // ================================
 router.get('/profile/own', authenticateToken, isAuthenticated, userController.getOwnProfile);
 router.patch('/update-own/profile', authenticateToken, isAuthenticated, userController.updateOwnProfile);
+router.get('/profile/telegram/bot-info', authenticateToken, isAuthenticated, userController.getTelegramBotInfo);
+router.post('/profile/telegram/test', authenticateToken, isAuthenticated, userController.testTelegramNotification);
 router.post('/payment-methods', authenticateToken, isAuthenticated, userController.addPaymentMethod);
 router.delete('/payment-methods/:methodId', authenticateToken, isAuthenticated, userController.deletePaymentMethod);
 router.put('/payment-methods/:methodId', authenticateToken, isAuthenticated, userController.editPaymentMethod);

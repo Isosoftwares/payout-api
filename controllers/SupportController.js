@@ -1,4 +1,5 @@
 const Support = require("../models/Support");
+const telegramService = require("../services/telegramService");
 
 const sendUsMessage = async (req, res) => {
   const { userId, message, role, userName } = req.body;
@@ -25,7 +26,6 @@ const sendUsMessage = async (req, res) => {
       });
 
       await newMessage.save();
-      res.status(200).json({ message: "Message sent " });
     } else {
       role === "admin"
         ? (supportMessage.customerUnread += 1)
@@ -38,8 +38,30 @@ const sendUsMessage = async (req, res) => {
       });
 
       await supportMessage.save();
-      res.status(200).json({ message: "Message sent " });
     }
+
+    // Dispatch Telegram Notifications
+    if (role === "client") {
+      const adminTeleMsg = telegramService.formatNotification({
+        icon: "💬",
+        title: "New Support Message",
+        message: `Client <b>${userName}</b> sent a support message:\n<i>"${message.length > 120 ? message.substring(0, 117) + "..." : message}"</i>`,
+        details: [
+          { label: "From", value: userName },
+          { label: "Client ID", value: userId },
+        ],
+      });
+      telegramService.sendToAdmins(adminTeleMsg).catch(() => {});
+    } else if (role === "admin") {
+      const clientTeleMsg = telegramService.formatNotification({
+        icon: "💬",
+        title: "Support Team Reply",
+        message: `Support team replied to your message:\n<i>"${message.length > 120 ? message.substring(0, 117) + "..." : message}"</i>`,
+      });
+      telegramService.sendToUser(userId, clientTeleMsg).catch(() => {});
+    }
+
+    res.status(200).json({ message: "Message sent " });
   } catch (error) {
     console.log(error);
     return res.status(500).json({ message: "Something went wrong" });

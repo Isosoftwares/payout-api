@@ -5,10 +5,10 @@ const {
   getSubaccounts,
   deleteSubaccount
 } = require('../controllers/subaccountController');
-const { authenticateToken, isClient } = require('../middleware/auth');
+const { authenticateToken, isAuthenticated } = require('../middleware/auth');
 
-router.post('/', authenticateToken, isClient, createSubaccount);
-router.get('/', authenticateToken, isClient, getSubaccounts);
-router.delete('/:id', authenticateToken, isClient, deleteSubaccount);
+router.post('/', authenticateToken, isAuthenticated, createSubaccount);
+router.get('/', authenticateToken, isAuthenticated, getSubaccounts);
+router.delete('/:id', authenticateToken, isAuthenticated, deleteSubaccount);
 
 module.exports = router;

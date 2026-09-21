@@ -6,6 +6,7 @@ const fs = require('fs');
 const { createObjectCsvStringifier } = require('csv-writer');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
+const telegramService = require('../services/telegramService');
 
 // Seed maturity settings if they don't exist
 const initializeMaturitySettings = async () => {
@@ -157,6 +158,20 @@ const uploadPayments = async (req, res) => {
               message: `A payment of $${amount} was received for payout name ${payoutName.name}.`,
               link: '/client/payout-names'
             });
+
+            // Send Telegram Notification to client
+            const teleMsg = telegramService.formatNotification({
+              icon: "💰",
+              title: "Payment Received",
+              message: `A payment of <b>$${amount.toFixed(2)}</b> was received for payout name <b>${payoutName.name}</b>.`,
+              details: [
+                { label: "Payout Name", value: payoutName.name },
+                { label: "Amount", value: `$${amount.toFixed(2)}` },
+                { label: "Payment Status", value: payoutName.paymentStatus },
+                ...(payoutName.maturedAt ? [{ label: "Maturity Date", value: new Date(payoutName.maturedAt).toLocaleDateString() }] : [])
+              ]
+            });
+            telegramService.sendToUser(payoutName.allocatedTo, teleMsg).catch(() => {});
           }
 
           matched++;

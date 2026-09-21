@@ -20,8 +20,9 @@ const {
   getAllSpecificNameRequests,
   approveSpecificNameRequest,
   rejectSpecificNameRequest,
+  adminCreateSpecificPayoutName,
 } = require("../controllers/payoutNameController");
-const { authenticateToken, isAdmin, isClient } = require("../middleware/auth");
+const { authenticateToken, isAdmin, isClient, isAuthenticated } = require("../middleware/auth");
 const fs = require("fs");
 
 // Ensure uploads directory exists
@@ -56,6 +57,7 @@ router.post("/upload", authenticateToken, isAdmin, upload.single("file"), upload
 router.get("/", authenticateToken, isAdmin, getPayoutNames);
 router.post("/assign", authenticateToken, isAdmin, assignNamesToClient);
 router.post("/unassign", authenticateToken, isAdmin, unassignNamesFromClient);
+router.post("/admin/create-specific", authenticateToken, isAdmin, adminCreateSpecificPayoutName);
 router.get("/requests", authenticateToken, isAdmin, getAllAllocationRequests);
 router.put("/requests/:id", authenticateToken, isAdmin, updateAllocationRequest);
 router.get("/specific-requests", authenticateToken, isAdmin, getAllSpecificNameRequests);
@@ -69,7 +71,7 @@ router.get("/requests/me", authenticateToken, isClient, getClientAllocationReque
 router.post("/specific-request", authenticateToken, isClient, createSpecificNameRequest);
 router.get("/specific-requests/me", authenticateToken, isClient, getClientSpecificNameRequests);
 router.get("/my-inventory", authenticateToken, isClient, getMyInventory);
-router.post("/claim", authenticateToken, isClient, claimPayoutNames);
+router.post("/claim", authenticateToken, isAuthenticated, claimPayoutNames);
 
 // Subaccount Routes
 router.get("/subaccount-inventory", authenticateToken, getSubaccountInventory);

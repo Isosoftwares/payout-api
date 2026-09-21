@@ -10,6 +10,7 @@ const connectDB = require('./config/dbConn')
 const mongoose = require('mongoose')
 // Cron job will be started after DB connection
 const { startCron, checkMaturity } = require('./cron');
+const telegramService = require('./services/telegramService');
 
 const PORT = process.env.PORT || 3500
 const allowedOrigins = require('./config/allowedOrigins')
@@ -68,6 +69,7 @@ mongoose.connection.once('open', () => {
   console.log(process.env.NODE_ENV)
   console.log('connected to mongo db')
   startCron();
+  telegramService.init();
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`))
 })
 
