@@ -18,6 +18,19 @@ const paymentUploadHistorySchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  items: [{
+    rowNum: Number,
+    name: String,
+    amount: String,
+    date: String,
+    status: {
+      type: String,
+      enum: ["Success", "Failed"],
+      default: "Success"
+    },
+    claimedBy: String,
+    reason: String
+  }],
   errors: [{
     rowNum: Number,
     name: String,

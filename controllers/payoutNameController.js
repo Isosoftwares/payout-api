@@ -1,4 +1,6 @@
+const mongoose = require("mongoose");
 const PayoutName = require("../models/PayoutName");
+const PayoutNameLog = require("../models/PayoutNameLog");
 const User = require("../models/User");
 const XLSX = require("xlsx");
 const fs = require("fs");
@@ -152,7 +154,7 @@ const uploadPayoutNames = async (req, res) => {
 const getPayoutNames = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const limit = parseInt(req.query.limit) || 100;
     const search = req.query.search || '';
     const status = req.query.status || 'all';
     const allocatedTo = req.query.allocatedTo;
@@ -182,11 +184,36 @@ const getPayoutNames = async (req, res) => {
       }
     }
 
+    if (req.query.paymentStatus && req.query.paymentStatus !== 'all') {
+      query.paymentStatus = req.query.paymentStatus;
+    }
+
+    if (req.query.isBacklog !== undefined && req.query.isBacklog !== 'all') {
+      query.isBacklog = req.query.isBacklog === 'true';
+    }
+
+    if (req.query.claimBatchId) {
+      if (req.query.claimBatchId === 'unknown') {
+        const unknownOr = [{ claimBatchId: null }, { claimBatchId: { $exists: false } }, { claimedAt: null }];
+        if (query.$or) {
+          query.$and = [
+            { $or: query.$or },
+            { $or: unknownOr }
+          ];
+          delete query.$or;
+        } else {
+          query.$or = unknownOr;
+        }
+      } else {
+        query.claimBatchId = req.query.claimBatchId;
+      }
+    }
+
     const total = await PayoutName.countDocuments(query);
     const payoutNames = await PayoutName.find(query)
       .populate('allocatedTo', 'email profile')
       .populate('claimedForSubaccount', 'username')
-      .sort({ createdAt: -1 })
+      .sort({ claimedAt: -1, createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit);
 
@@ -203,39 +230,190 @@ const getPayoutNames = async (req, res) => {
 
 const AllocationRequest = require("../models/AllocationRequest");
 
-// @desc    Client requests allocation of names
+// @desc    Get client's self-allocation quota for today
+// @route   GET /api/payout-names/self-allocation-quota
+// @access  Private/Client
+const getSelfAllocationQuota = async (req, res) => {
+  try {
+    const clientId = req.user.id;
+    const clientUser = await User.findById(clientId).select("dailySelfAllocationLimit");
+    const dailyLimit = clientUser?.dailySelfAllocationLimit || 0;
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const agg = await AllocationRequest.aggregate([
+      {
+        $match: {
+          client: new mongoose.Types.ObjectId(clientId),
+          isSelfAllocated: true,
+          createdAt: { $gte: startOfDay }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$allocatedCount" }
+        }
+      }
+    ]);
+
+    const usedToday = agg[0]?.total || 0;
+    const remainingToday = Math.max(0, dailyLimit - usedToday);
+    const availablePool = await PayoutName.countDocuments({ status: "available" });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        dailyLimit,
+        usedToday,
+        remainingToday,
+        availablePool
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// @desc    Client requests allocation of names (with auto-allocation up to daily quota)
 // @route   POST /api/payout-names/request
 // @access  Private/Client
 const createAllocationRequest = async (req, res) => {
   try {
-    const { requestedCount } = req.body;
+    const requestedCount = parseInt(req.body.requestedCount, 10);
     if (!requestedCount || requestedCount < 1) {
       return res.status(400).json({ message: "Please provide a valid requestedCount" });
     }
-    const newRequest = await AllocationRequest.create({
-      client: req.user.id,
-      requestedCount
-    });
 
-    // Broadcast to all admins on Telegram
-    User.findById(req.user.id).select('email profile').then(clientUser => {
-      const clientName = clientUser?.profile?.firstName 
-        ? `${clientUser.profile.firstName} ${clientUser.profile.lastName || ''}`.trim() 
-        : (clientUser?.email || 'A client');
+    const clientId = req.user.id;
+    const clientUser = await User.findById(clientId);
+    const dailyLimit = clientUser?.dailySelfAllocationLimit || 0;
+
+    // Check how many names client has already self-allocated today
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const agg = await AllocationRequest.aggregate([
+      {
+        $match: {
+          client: new mongoose.Types.ObjectId(clientId),
+          isSelfAllocated: true,
+          createdAt: { $gte: startOfDay }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$allocatedCount" }
+        }
+      }
+    ]);
+
+    const usedToday = agg[0]?.total || 0;
+    const remainingQuota = Math.max(0, dailyLimit - usedToday);
+
+    let autoAllocated = 0;
+    let pendingCount = requestedCount;
+
+    // If client has remaining daily self-allocation quota
+    if (remainingQuota > 0) {
+      const toAllocate = Math.min(requestedCount, remainingQuota);
+      const availableCount = await PayoutName.countDocuments({ status: "available" });
+      const canAllocateNow = Math.min(toAllocate, availableCount);
+
+      if (canAllocateNow > 0) {
+        const namesToAllocate = await PayoutName.find({ status: "available" }).limit(canAllocateNow);
+        const nameIds = namesToAllocate.map(n => n._id);
+
+        await PayoutName.updateMany(
+          { _id: { $in: nameIds } },
+          { $set: { status: "allocated", allocatedTo: clientId, updatedAt: Date.now() } }
+        );
+
+        autoAllocated = canAllocateNow;
+        pendingCount = requestedCount - autoAllocated;
+
+        // Record approved self-allocation request
+        await AllocationRequest.create({
+          client: clientId,
+          requestedCount: autoAllocated,
+          allocatedCount: autoAllocated,
+          status: "approved",
+          isSelfAllocated: true,
+          adminNote: `Auto-allocated via daily self-allocation quota (${usedToday + autoAllocated}/${dailyLimit} used today)`
+        });
+      }
+    }
+
+    let pendingRequest = null;
+    if (pendingCount > 0) {
+      pendingRequest = await AllocationRequest.create({
+        client: clientId,
+        requestedCount: pendingCount,
+        allocatedCount: 0,
+        status: "pending",
+        isSelfAllocated: false
+      });
+    }
+
+    // Client label
+    const clientName = clientUser?.profile?.firstName 
+      ? `${clientUser.profile.firstName} ${clientUser.profile.lastName || ""}`.trim() 
+      : (clientUser?.email || "A client");
+
+    // Telegram notification to admins
+    try {
+      const teleDetails = [
+        { label: "Client", value: `${clientName} (${clientUser?.email || ""})` },
+        { label: "Total Requested", value: requestedCount }
+      ];
+      if (autoAllocated > 0) {
+        teleDetails.push({ label: "⚡ Auto-Allocated", value: `${autoAllocated} names` });
+      }
+      if (pendingCount > 0) {
+        teleDetails.push({ label: "⏳ Pending Approval", value: `${pendingCount} names` });
+      }
 
       const adminTeleMsg = telegramService.formatNotification({
-        icon: "📋",
-        title: "New Allocation Request",
-        message: `Client <b>${clientName}</b> requested allocation of <b>${requestedCount}</b> payout name(s).`,
-        details: [
-          { label: "Client", value: `${clientName} (${clientUser?.email || ''})` },
-          { label: "Quantity", value: requestedCount }
-        ]
+        icon: autoAllocated > 0 && pendingCount === 0 ? "⚡" : "📋",
+        title: autoAllocated > 0 && pendingCount === 0 
+          ? "Client Self-Allocation" 
+          : autoAllocated > 0 
+          ? "Partial Self-Allocation & Pending Request" 
+          : "New Allocation Request",
+        message: autoAllocated > 0 && pendingCount === 0
+          ? `Client <b>${clientName}</b> self-allocated <b>${autoAllocated}</b> payout name(s) via daily quota.`
+          : autoAllocated > 0
+          ? `Client <b>${clientName}</b> self-allocated <b>${autoAllocated}</b> name(s). Remaining <b>${pendingCount}</b> pending admin approval.`
+          : `Client <b>${clientName}</b> requested allocation of <b>${requestedCount}</b> payout name(s).`,
+        details: teleDetails
       });
       telegramService.sendToAdmins(adminTeleMsg).catch(() => {});
-    }).catch(() => {});
+    } catch (teleErr) {
+      console.error("Telegram notification error:", teleErr);
+    }
 
-    res.status(201).json({ message: "Request submitted successfully", data: newRequest });
+    let message = "";
+    if (autoAllocated > 0 && pendingCount === 0) {
+      message = `Successfully self-allocated ${autoAllocated} payout name(s) directly to your account!`;
+    } else if (autoAllocated > 0 && pendingCount > 0) {
+      message = `Successfully self-allocated ${autoAllocated} name(s) instantly! The remaining ${pendingCount} name(s) have been submitted for Admin approval.`;
+    } else {
+      message = `Request for ${requestedCount} payout name(s) submitted for Admin approval.`;
+    }
+
+    res.status(201).json({
+      success: true,
+      message,
+      data: {
+        autoAllocated,
+        pendingCount,
+        remainingDailyQuota: Math.max(0, remainingQuota - autoAllocated),
+        dailyLimit,
+        pendingRequest
+      }
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -439,31 +617,58 @@ const getMyInventory = async (req, res) => {
       allocatedTo: clientId
     });
 
-    const { search, subaccount } = req.query;
+    const { search, subaccount, paymentStatus } = req.query;
     
-    let filter = {
-      status: 'claimed',
-      allocatedTo: clientId
-    };
+    // Base conditions: claimed, allocated to client, and hide unpaid backlog names
+    const andConditions = [
+      { status: 'claimed' },
+      { allocatedTo: clientId },
+      {
+        $or: [
+          { isBacklog: { $ne: true } },
+          { isBacklog: true, paymentStatus: { $ne: 'not_received' } }
+        ]
+      }
+    ];
 
     if (search) {
-      filter.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { accountNumber: { $regex: search, $options: 'i' } }
-      ];
+      andConditions.push({
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { accountNumber: { $regex: search, $options: 'i' } }
+        ]
+      });
     }
 
     if (subaccount) {
       if (subaccount === 'self') {
-        filter.claimedForSubaccount = null;
+        andConditions.push({ claimedForSubaccount: null });
       } else {
-        filter.claimedForSubaccount = subaccount;
+        andConditions.push({ claimedForSubaccount: subaccount });
       }
     }
 
-    const claimedNames = await PayoutName.find(filter)
+    if (paymentStatus && paymentStatus !== 'all') {
+      andConditions.push({ paymentStatus });
+    }
+
+    if (req.query.claimBatchId) {
+      if (req.query.claimBatchId === 'unknown') {
+        andConditions.push({
+          $or: [
+            { claimBatchId: null },
+            { claimBatchId: { $exists: false } },
+            { claimedAt: null }
+          ]
+        });
+      } else {
+        andConditions.push({ claimBatchId: req.query.claimBatchId });
+      }
+    }
+
+    const claimedNames = await PayoutName.find({ $and: andConditions })
       .populate('claimedForSubaccount', 'username')
-      .sort({ updatedAt: -1 });
+      .sort({ claimedAt: -1, updatedAt: -1 });
 
     res.status(200).json({
       success: true,
@@ -516,13 +721,30 @@ const claimPayoutNames = async (req, res) => {
       }
 
       const idsToClaim = allocatedNames.map(name => name._id);
+      const claimedAt = new Date();
+      const claimBatchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
       await PayoutName.updateMany(
         { _id: { $in: idsToClaim } },
-        { $set: { status: 'claimed', claimedForSubaccount, updatedAt: Date.now() } }
+        { $set: { status: 'claimed', claimedForSubaccount, claimedAt, claimBatchId, updatedAt: Date.now() } }
       );
 
-      return res.status(200).json({ success: true, claimedCount: count, message: `Successfully claimed ${count} payout names` });
+      try {
+        const claimLogs = idsToClaim.map(id => ({
+          payoutName: id,
+          action: 'claimed',
+          paymentStatus: 'not_received',
+          narration: subaccountDoc ? `Claimed for subaccount: ${subaccountDoc.username}` : 'Claimed for main account (Self)',
+          performedBy: req.user.id,
+          performedByRole: 'client',
+          timestamp: claimedAt
+        }));
+        await PayoutNameLog.insertMany(claimLogs);
+      } catch (err) {
+        console.error("Error logging claims:", err);
+      }
+
+      return res.status(200).json({ success: true, claimedCount: count, claimBatchId, message: `Successfully claimed ${count} payout names` });
     }
 
     // IF ADMIN USER: Direct Claim Logic
@@ -547,11 +769,14 @@ const claimPayoutNames = async (req, res) => {
       poolIds = availablePoolNames.map(n => n._id);
     }
 
+    const claimedAt = new Date();
+    const claimBatchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
     // Update allocated names to claimed
     if (allocatedIds.length > 0) {
       await PayoutName.updateMany(
         { _id: { $in: allocatedIds } },
-        { $set: { status: 'claimed', claimedForSubaccount, updatedAt: Date.now() } }
+        { $set: { status: 'claimed', claimedForSubaccount, claimedAt, claimBatchId, updatedAt: Date.now() } }
       );
     }
 
@@ -559,8 +784,24 @@ const claimPayoutNames = async (req, res) => {
     if (poolIds.length > 0) {
       await PayoutName.updateMany(
         { _id: { $in: poolIds } },
-        { $set: { status: 'claimed', allocatedTo: clientId, claimedForSubaccount, updatedAt: Date.now() } }
+        { $set: { status: 'claimed', allocatedTo: clientId, claimedForSubaccount, claimedAt, claimBatchId, updatedAt: Date.now() } }
       );
+    }
+
+    try {
+      const allClaimedIds = [...allocatedIds, ...poolIds];
+      const adminClaimLogs = allClaimedIds.map(id => ({
+        payoutName: id,
+        action: 'claimed',
+        paymentStatus: 'not_received',
+        narration: subaccountDoc ? `Directly claimed by Admin for subaccount: ${subaccountDoc.username}` : 'Directly claimed by Admin for main account (Self)',
+        performedBy: req.user.id,
+        performedByRole: 'admin',
+        timestamp: new Date()
+      }));
+      await PayoutNameLog.insertMany(adminClaimLogs);
+    } catch (err) {
+      console.error("Error logging admin direct claims:", err);
     }
 
     // Send Telegram notification to client if connected
@@ -844,6 +1085,8 @@ const approveSpecificNameRequest = async (req, res) => {
     }
 
     // 3. Create PayoutName with status 'claimed' directly
+    const claimedAt = new Date();
+    const claimBatchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const newPayoutName = await PayoutName.create({
       name: request.requestedName,
       nameLower: request.requestedNameLower,
@@ -852,6 +1095,8 @@ const approveSpecificNameRequest = async (req, res) => {
       status: "claimed",
       allocatedTo: request.client,
       claimedForSubaccount: request.subaccount || null,
+      claimedAt,
+      claimBatchId,
       paymentStatus: "not_received",
       amount: 0,
     });
@@ -1004,6 +1249,8 @@ const adminCreateSpecificPayoutName = async (req, res) => {
     }
 
     // Create the PayoutName with status 'claimed' directly
+    const claimedAt = new Date();
+    const claimBatchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const newPayoutName = await PayoutName.create({
       name: trimmedName,
       nameLower,
@@ -1012,6 +1259,8 @@ const adminCreateSpecificPayoutName = async (req, res) => {
       status: "claimed",
       allocatedTo: clientId,
       claimedForSubaccount,
+      claimedAt,
+      claimBatchId,
       paymentStatus: "not_received",
       amount: 0,
     });
@@ -1028,6 +1277,20 @@ const adminCreateSpecificPayoutName = async (req, res) => {
       payoutName: newPayoutName._id,
       adminNote: "Directly created by administrator",
     });
+
+    try {
+      await PayoutNameLog.create({
+        payoutName: newPayoutName._id,
+        action: 'created',
+        paymentStatus: 'not_received',
+        narration: `Specific payout name created and claimed for ${subaccountDoc ? subaccountDoc.username : "Main Account (Self)"}`,
+        performedBy: req.user.id,
+        performedByRole: 'admin',
+        timestamp: new Date()
+      });
+    } catch (err) {
+      console.error("Error logging specific name creation:", err);
+    }
 
     const populated = await PayoutName.findById(newPayoutName._id)
       .populate('allocatedTo', 'email profile')
@@ -1065,8 +1328,238 @@ const adminCreateSpecificPayoutName = async (req, res) => {
   }
 };
 
+// @desc    Upload Backlog Payout Names for a client (claimed, hidden from client until payment is received)
+// @route   POST /api/payout-names/admin/upload-backlog
+// @access  Private/Admin
+const uploadBacklogNames = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "Please upload a CSV or Excel file." });
+    }
+
+    const { clientId } = req.body;
+    if (!clientId) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(400).json({ message: "Client ID is required for backlog name upload." });
+    }
+
+    const client = await User.findById(clientId);
+    if (!client) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(404).json({ message: "Client not found." });
+    }
+
+    // Read and parse file using XLSX
+    let results = [];
+    try {
+      const workbook = XLSX.readFile(req.file.path, { cellDates: true, raw: false });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      results = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+    } catch (parseErr) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(400).json({ message: "Failed to parse file. Ensure it is a valid CSV or Excel file.", error: parseErr.message });
+    }
+
+    if (results.length === 0) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(400).json({ message: "The uploaded file contains no data rows." });
+    }
+
+    const errors = [];
+    let duplicates = 0;
+    let added = 0;
+
+    for (const row of results) {
+      const keys = Object.keys(row);
+      let name = null;
+      let routingNumber = null;
+      let accountNumber = null;
+
+      for (const key of keys) {
+        const lowerKey = key.trim().toLowerCase();
+        if (lowerKey === "name" || lowerKey === "payout name" || lowerKey === "payoutname") {
+          name = String(row[key]).trim();
+        } else if (lowerKey === "routing number" || lowerKey === "routingnumber" || lowerKey === "routing") {
+          routingNumber = String(row[key]).trim();
+        } else if (lowerKey === "account number" || lowerKey === "accountnumber" || lowerKey === "account") {
+          accountNumber = String(row[key]).trim();
+        }
+      }
+
+      if (!name || !routingNumber || !accountNumber) {
+        errors.push(`Row missing required fields (name, routingNumber, accountNumber): ${JSON.stringify(row)}`);
+        continue;
+      }
+
+      const nameLower = name.toLowerCase();
+
+      try {
+        const existing = await PayoutName.findOne({
+          $or: [
+            { nameLower },
+            { accountNumber }
+          ]
+        });
+
+        if (existing) {
+          duplicates++;
+          errors.push(`Duplicate entry '${name}' or account '${accountNumber}' already exists.`);
+          continue;
+        }
+
+        await PayoutName.create({
+          name,
+          nameLower,
+          routingNumber,
+          accountNumber,
+          status: "claimed",
+          allocatedTo: client._id,
+          claimedForSubaccount: null, // self
+          isBacklog: true,
+          paymentStatus: "not_received",
+          amount: 0,
+        });
+
+        added++;
+      } catch (dbErr) {
+        if (dbErr.code === 11000) {
+          duplicates++;
+          errors.push(`Duplicate entry '${name}': already exists in database.`);
+        } else {
+          errors.push(`Error saving '${name}': ${dbErr.message}`);
+        }
+      }
+    }
+
+    // Clean up temp file
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+
+    const clientLabel = client.profile?.firstName
+      ? `${client.profile.firstName} ${client.profile.lastName || ''} (${client.email})`.trim()
+      : client.email;
+
+    return res.status(200).json({
+      success: true,
+      message: `Backlog upload complete. ${added} backlog names allocated to ${clientLabel} (hidden until payment received).`,
+      report: {
+        totalProcessed: results.length,
+        added,
+        duplicates,
+        errors,
+        client: clientLabel,
+      },
+    });
+  } catch (error) {
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    console.error("Upload backlog error:", error);
+    return res.status(500).json({ message: "Server error uploading backlog names", error: error.message });
+  }
+};
+
+// @desc    Get activity logs for a payout name
+// @route   GET /api/payout-names/:id/logs
+// @access  Private (Admin or assigned Client)
+const getPayoutNameLogs = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const payoutName = await PayoutName.findById(id)
+      .populate('allocatedTo', 'email profile')
+      .populate('claimedForSubaccount', 'username');
+
+    if (!payoutName) {
+      return res.status(404).json({ message: "Payout name not found." });
+    }
+
+    // Check authorization: Admin or the client to whom it's allocated/claimed
+    if (req.user.role !== 'admin') {
+      const clientOwnerId = payoutName.allocatedTo?._id?.toString() || payoutName.allocatedTo?.toString();
+      if (clientOwnerId !== req.user.id) {
+        return res.status(403).json({ message: "You are not authorized to view logs for this payout name." });
+      }
+    }
+
+    const logs = await PayoutNameLog.find({ payoutName: id })
+      .populate('performedBy', 'email profile username role')
+      .sort({ timestamp: -1, createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      payoutName,
+      logs
+    });
+  } catch (error) {
+    console.error("Error fetching payout name logs:", error);
+    return res.status(500).json({ message: "Server error fetching logs", error: error.message });
+  }
+};
+
+// @desc    Add manual narration/note to a payout name
+// @route   POST /api/payout-names/:id/logs/narration
+// @access  Private (Admin or assigned Client)
+const addPayoutNameLogNarration = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { narration } = req.body;
+
+    if (!narration || !narration.trim()) {
+      return res.status(400).json({ message: "Narration text is required." });
+    }
+
+    const payoutName = await PayoutName.findById(id);
+    if (!payoutName) {
+      return res.status(404).json({ message: "Payout name not found." });
+    }
+
+    if (req.user.role !== 'admin') {
+      const clientOwnerId = payoutName.allocatedTo?.toString();
+      if (clientOwnerId !== req.user.id) {
+        return res.status(403).json({ message: "You are not authorized to add notes to this payout name." });
+      }
+    }
+
+    const newLog = await PayoutNameLog.create({
+      payoutName: id,
+      action: 'narration_note',
+      amount: payoutName.amount || 0,
+      paymentStatus: payoutName.paymentStatus || 'not_received',
+      paymentDate: payoutName.paymentReceivedDate || null,
+      maturityDate: payoutName.maturityDate || null,
+      narration: narration.trim(),
+      performedBy: req.user.id,
+      performedByRole: req.user.role === 'admin' ? 'admin' : 'client',
+      timestamp: new Date()
+    });
+
+    const populatedLog = await PayoutNameLog.findById(newLog._id)
+      .populate('performedBy', 'email profile username role');
+
+    return res.status(201).json({
+      success: true,
+      message: "Narration note added successfully",
+      log: populatedLog
+    });
+  } catch (error) {
+    console.error("Error adding narration note:", error);
+    return res.status(500).json({ message: "Server error adding narration note", error: error.message });
+  }
+};
+
 module.exports = {
   uploadPayoutNames,
+  uploadBacklogNames,
   getPayoutNames,
   createAllocationRequest,
   getClientAllocationRequests,
@@ -1084,4 +1577,7 @@ module.exports = {
   approveSpecificNameRequest,
   rejectSpecificNameRequest,
   adminCreateSpecificPayoutName,
+  getPayoutNameLogs,
+  addPayoutNameLogNarration,
+  getSelfAllocationQuota,
 };

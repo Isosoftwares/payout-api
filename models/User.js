@@ -36,6 +36,11 @@ const userSchema = new mongoose.Schema({
     default: 0,
     min: 0,
   },
+  dailySelfAllocationLimit: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
   mustChangePassword: {
     type: Boolean,
     default: false,

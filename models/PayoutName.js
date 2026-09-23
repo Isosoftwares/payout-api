@@ -53,6 +53,21 @@ const payoutNameSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  isBacklog: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  claimedAt: {
+    type: Date,
+    default: null,
+    index: true
+  },
+  claimBatchId: {
+    type: String,
+    default: null,
+    index: true
+  },
 },{
   timestamps: true,
 });

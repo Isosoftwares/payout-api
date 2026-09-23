@@ -1,5 +1,6 @@
 const PayoutTransaction = require('../models/PayoutTransaction');
 const PayoutName = require('../models/PayoutName');
+const PayoutNameLog = require('../models/PayoutNameLog');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const telegramService = require('../services/telegramService');
@@ -163,6 +164,25 @@ const executeBatchPayout = async (req, res) => {
       { _id: { $in: payoutNameIds } },
       { $set: { paymentStatus: 'paid', amount: 0, maturityDate: null, paymentReceivedDate: null } }
     );
+
+    // Create activity logs for paid names
+    try {
+      const paidLogs = names.map(n => ({
+        payoutName: n._id,
+        action: 'paid',
+        amount: n.amount || 0,
+        paymentStatus: 'paid',
+        paymentDate: n.paymentReceivedDate || null,
+        maturityDate: n.maturityDate || null,
+        narration: referenceId ? `Batch payout completed (Ref: ${referenceId})` : 'Batch payout completed',
+        performedBy: adminId,
+        performedByRole: 'admin',
+        timestamp: new Date()
+      }));
+      await PayoutNameLog.insertMany(paidLogs);
+    } catch (logErr) {
+      console.error('Error logging batch payout completion:', logErr);
+    }
     
     // Update Client Accumulators
     await User.findByIdAndUpdate(clientId, {

@@ -4,6 +4,7 @@ const multer = require("multer");
 const path = require("path");
 const { 
   uploadPayoutNames, 
+  uploadBacklogNames,
   getPayoutNames,
   createAllocationRequest,
   getClientAllocationRequests,
@@ -21,6 +22,9 @@ const {
   approveSpecificNameRequest,
   rejectSpecificNameRequest,
   adminCreateSpecificPayoutName,
+  getPayoutNameLogs,
+  addPayoutNameLogNarration,
+  getSelfAllocationQuota,
 } = require("../controllers/payoutNameController");
 const { authenticateToken, isAdmin, isClient, isAuthenticated } = require("../middleware/auth");
 const fs = require("fs");
@@ -54,6 +58,7 @@ const upload = multer({
 
 // Admin Routes
 router.post("/upload", authenticateToken, isAdmin, upload.single("file"), uploadPayoutNames);
+router.post("/admin/upload-backlog", authenticateToken, isAdmin, upload.single("file"), uploadBacklogNames);
 router.get("/", authenticateToken, isAdmin, getPayoutNames);
 router.post("/assign", authenticateToken, isAdmin, assignNamesToClient);
 router.post("/unassign", authenticateToken, isAdmin, unassignNamesFromClient);
@@ -65,7 +70,12 @@ router.put("/specific-requests/:id/approve", authenticateToken, isAdmin, approve
 router.put("/specific-requests/:id/reject", authenticateToken, isAdmin, rejectSpecificNameRequest);
 router.delete("/:id", authenticateToken, isAdmin, deletePayoutName);
 
+// Activity Logs & Narration (Admin and owner Client)
+router.get("/:id/logs", authenticateToken, isAuthenticated, getPayoutNameLogs);
+router.post("/:id/logs/narration", authenticateToken, isAuthenticated, addPayoutNameLogNarration);
+
 // Client Routes
+router.get("/self-allocation-quota", authenticateToken, isClient, getSelfAllocationQuota);
 router.post("/request", authenticateToken, isClient, createAllocationRequest);
 router.get("/requests/me", authenticateToken, isClient, getClientAllocationRequests);
 router.post("/specific-request", authenticateToken, isClient, createSpecificNameRequest);

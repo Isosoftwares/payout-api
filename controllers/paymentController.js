@@ -1,4 +1,5 @@
 const PayoutName = require('../models/PayoutName');
+const PayoutNameLog = require('../models/PayoutNameLog');
 const MaturitySetting = require('../models/MaturitySetting');
 const PaymentUploadHistory = require('../models/PaymentUploadHistory');
 const XLSX = require('xlsx');
@@ -71,6 +72,7 @@ const uploadPayments = async (req, res) => {
       return res.status(400).json({ message: "Invalid headers. File must contain columns: Name, Amount, Date" });
     }
 
+    const items = [];
     const errors = [];
     let processed = 0;
     let matched = 0;
@@ -89,13 +91,17 @@ const uploadPayments = async (req, res) => {
       }
 
       if (!name || amountRaw === undefined || amountRaw === null || amountRaw === '' || dateRaw === undefined || dateRaw === null || dateRaw === '') {
-        errors.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw || '', reason: "Missing required fields" });
+        const reason = "Missing required fields";
+        errors.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw || '', reason });
+        items.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw || '', status: 'Failed', claimedBy: 'N/A', reason });
         continue;
       }
 
       const amount = parseFloat(amountRaw.toString().replace(/,/g, '').trim());
       if (isNaN(amount) || amount <= 0) {
-        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: "Invalid amount format" });
+        const reason = "Invalid amount format";
+        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
+        items.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, status: 'Failed', claimedBy: 'N/A', reason });
         continue;
       }
 
@@ -115,7 +121,9 @@ const uploadPayments = async (req, res) => {
       }
 
       if (!paymentDate || isNaN(paymentDate.getTime())) {
-        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: "Invalid date format" });
+        const reason = "Invalid date format";
+        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
+        items.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, status: 'Failed', claimedBy: 'N/A', reason });
         continue;
       }
 
@@ -125,11 +133,45 @@ const uploadPayments = async (req, res) => {
       const maturityDate = new Date(paymentDate);
       maturityDate.setUTCDate(maturityDate.getUTCDate() + offsetDays);
 
-      const payoutName = await PayoutName.findOne({ nameLower: name.toLowerCase() });
+      const payoutName = await PayoutName.findOne({ nameLower: name.toLowerCase() })
+        .populate('allocatedTo', 'email profile')
+        .populate('claimedForSubaccount', 'username');
 
       if (payoutName) {
+        // Resolve who the name is claimed or allocated to
+        let claimedByLabel = 'Available Pool (Unallocated)';
+        if (payoutName.allocatedTo) {
+          const clientEmail = payoutName.allocatedTo.email || '';
+          const clientName = payoutName.allocatedTo.profile?.companyName ||
+            [payoutName.allocatedTo.profile?.firstName, payoutName.allocatedTo.profile?.lastName].filter(Boolean).join(' ') ||
+            clientEmail;
+          const subLabel = payoutName.claimedForSubaccount?.username
+            ? `Subaccount: ${payoutName.claimedForSubaccount.username}`
+            : 'Self';
+
+          if (payoutName.status === 'claimed') {
+            claimedByLabel = `${clientName} (${clientEmail}) [${subLabel}]`;
+          } else if (payoutName.status === 'allocated') {
+            claimedByLabel = `Allocated to: ${clientName} (${clientEmail}) [Unclaimed]`;
+          } else {
+            claimedByLabel = `Available (Assigned: ${clientEmail})`;
+          }
+        } else if (payoutName.status === 'claimed') {
+          claimedByLabel = 'Claimed (No Client Linked)';
+        }
+
         if (payoutName.status !== 'claimed') {
-          errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: `Payout name is not claimed (Current status: ${payoutName.status})` });
+          const reason = `Payout name is not claimed (Current status: ${payoutName.status})`;
+          errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
+          items.push({
+            rowNum: processed,
+            name,
+            amount: amountRaw,
+            date: dateRaw,
+            status: 'Failed',
+            claimedBy: claimedByLabel,
+            reason
+          });
         } else {
           if (payoutName.paymentStatus === 'received' || payoutName.paymentStatus === 'matured') {
             payoutName.amount = (payoutName.amount || 0) + amount;
@@ -146,13 +188,31 @@ const uploadPayments = async (req, res) => {
           }
           await payoutName.save();
 
-          if (payoutName.allocatedTo) {
-            await User.findByIdAndUpdate(payoutName.allocatedTo, {
+          try {
+            await PayoutNameLog.create({
+              payoutName: payoutName._id,
+              action: 'payment_received',
+              amount: amount,
+              paymentStatus: 'received',
+              paymentDate: paymentDate,
+              maturityDate: maturityDate,
+              narration: req.file?.originalname ? `Payment received via upload: ${req.file.originalname}` : 'Payment received',
+              performedBy: req.user?._id || null,
+              performedByRole: req.user?.role || 'admin',
+              timestamp: new Date()
+            });
+          } catch (logErr) {
+            console.error('Error logging payment received:', logErr);
+          }
+
+          const clientUserId = payoutName.allocatedTo?._id || payoutName.allocatedTo;
+          if (clientUserId) {
+            await User.findByIdAndUpdate(clientUserId, {
               $inc: { totalReceivedUSD: amount }
             });
 
             await Notification.create({
-              recipient: payoutName.allocatedTo,
+              recipient: clientUserId,
               type: 'deposit',
               title: 'Payment Received',
               message: `A payment of $${amount} was received for payout name ${payoutName.name}.`,
@@ -168,16 +228,35 @@ const uploadPayments = async (req, res) => {
                 { label: "Payout Name", value: payoutName.name },
                 { label: "Amount", value: `$${amount.toFixed(2)}` },
                 { label: "Payment Status", value: payoutName.paymentStatus },
-                ...(payoutName.maturedAt ? [{ label: "Maturity Date", value: new Date(payoutName.maturedAt).toLocaleDateString() }] : [])
+                ...(payoutName.maturityDate ? [{ label: "Maturity Date", value: new Date(payoutName.maturityDate).toLocaleDateString() }] : [])
               ]
             });
-            telegramService.sendToUser(payoutName.allocatedTo, teleMsg).catch(() => {});
+            telegramService.sendToUser(clientUserId, teleMsg).catch(() => {});
           }
 
           matched++;
+          items.push({
+            rowNum: processed,
+            name,
+            amount: amountRaw,
+            date: dateRaw,
+            status: 'Success',
+            claimedBy: claimedByLabel,
+            reason: 'Payment applied successfully'
+          });
         }
       } else {
-        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason: "Payout name not found in database" });
+        const reason = "Payout name not found in database";
+        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
+        items.push({
+          rowNum: processed,
+          name,
+          amount: amountRaw,
+          date: dateRaw,
+          status: 'Failed',
+          claimedBy: 'Not Found in DB',
+          reason
+        });
       }
     }
 
@@ -186,12 +265,13 @@ const uploadPayments = async (req, res) => {
       fs.unlinkSync(req.file.path);
     }
 
-    // Save history
+    // Save history with items and errors
     const history = await PaymentUploadHistory.create({
       uploadedBy: req.user.id,
       fileName: req.file.originalname,
       totalProcessed: processed,
       totalMatched: matched,
+      items: items,
       errors: errors
     });
 
@@ -260,28 +340,55 @@ const downloadUploadReport = async (req, res) => {
       return res.status(404).json({ message: "History not found" });
     }
 
-    if (!history.errors || history.errors.length === 0) {
-      return res.status(400).json({ message: "No errors in this upload to download" });
+    let records = [];
+    if (history.items && history.items.length > 0) {
+      records = history.items.map(item => ({
+        rowNum: item.rowNum,
+        name: item.name,
+        amount: item.amount,
+        date: item.date,
+        status: item.status || 'Success',
+        claimedBy: item.claimedBy || 'N/A',
+        reason: item.reason || ''
+      }));
+    } else if (history.errors && history.errors.length > 0) {
+      // Fallback for older upload records
+      records = history.errors.map(err => ({
+        rowNum: err.rowNum,
+        name: err.name,
+        amount: err.amount,
+        date: err.date,
+        status: 'Failed',
+        claimedBy: 'N/A',
+        reason: err.reason || ''
+      }));
+    }
+
+    if (records.length === 0) {
+      return res.status(400).json({ message: "No records found for this upload to download" });
     }
 
     const csvStringifier = createObjectCsvStringifier({
       header: [
         { id: 'rowNum', title: 'Row Number' },
-        { id: 'name', title: 'Name' },
+        { id: 'name', title: 'Payout Name' },
         { id: 'amount', title: 'Amount' },
         { id: 'date', title: 'Date' },
-        { id: 'reason', title: 'Error Reason' }
+        { id: 'status', title: 'Status' },
+        { id: 'claimedBy', title: 'Claimed / Allocated To' },
+        { id: 'reason', title: 'Reason / Notes' }
       ]
     });
 
     const header = csvStringifier.getHeaderString();
-    const records = csvStringifier.stringifyRecords(history.errors);
+    const recordsCsv = csvStringifier.stringifyRecords(records);
 
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="upload_errors_${history._id}.csv"`);
-    res.send(header + records);
+    res.setHeader('Content-Disposition', `attachment; filename="upload_report_${history._id}.csv"`);
+    res.send(header + recordsCsv);
 
   } catch (error) {
+    console.error("Download upload report error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };

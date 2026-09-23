@@ -13,6 +13,7 @@ const payoutNameRoutes = require("./payoutNameRoutes");
 const subaccountRoutes = require("./subaccountRoutes");
 const paymentRoutes = require("./paymentRoutes");
 const batchPayoutRoutes = require("./batchPayoutRoutes");
+const reportRoutes = require("./reportRoutes");
 
 // Health check endpoint
 router.get("/health", (req, res) => {
@@ -36,6 +37,7 @@ router.use("/payout-names", payoutNameRoutes);
 router.use("/subaccounts", subaccountRoutes);
 router.use("/payments", paymentRoutes);
 router.use("/batch-payouts", batchPayoutRoutes);
+router.use("/reports", reportRoutes);
 
 // 404 handler for API routes
 router.use("*", (req, res) => {
