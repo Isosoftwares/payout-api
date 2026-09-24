@@ -26,6 +26,102 @@ const initializeMaturitySettings = async () => {
   }
 };
 
+// Accurately parses date representations (Excel serial, Date object, YYYY-MM-DD, DD/MM/YYYY, etc.)
+// into a pure UTC midnight Date object (00:00:00.000Z) with zero timezone offset drift.
+const parseCalendarDate = (raw) => {
+  if (raw === null || raw === undefined || raw === '') return null;
+
+  // Reject literal null/empty strings
+  const str = String(raw).trim();
+  if (!str || ['null', 'undefined', 'n/a', 'na', 'none', 'nil', '-', '0', 'invalid date'].includes(str.toLowerCase())) {
+    return null;
+  }
+
+  // 1. If raw is already a Date object
+  if (raw instanceof Date) {
+    if (isNaN(raw.getTime())) return null;
+    return new Date(Date.UTC(raw.getFullYear(), raw.getMonth(), raw.getDate(), 0, 0, 0, 0));
+  }
+
+  // 2. If raw is an Excel serial number (number or numeric string like 46289)
+  if (typeof raw === 'number' && !isNaN(raw)) {
+    const p = XLSX.SSF.parse_date_code(Math.floor(raw));
+    if (p && p.y && p.m && p.d) {
+      return new Date(Date.UTC(p.y, p.m - 1, p.d, 0, 0, 0, 0));
+    }
+  }
+
+  // Pure 5-digit Excel serial as string e.g. '46289'
+  if (/^\d{5}$/.test(str)) {
+    const p = XLSX.SSF.parse_date_code(parseInt(str, 10));
+    if (p && p.y && p.m && p.d) {
+      return new Date(Date.UTC(p.y, p.m - 1, p.d, 0, 0, 0, 0));
+    }
+  }
+
+  // 3. YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
+  const ymdMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (ymdMatch) {
+    const y = parseInt(ymdMatch[1], 10);
+    const m = parseInt(ymdMatch[2], 10);
+    const d = parseInt(ymdMatch[3], 10);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2000 && y <= 2100) {
+      return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+    }
+  }
+
+  // 4. DD/MM/YYYY or MM/DD/YYYY or DD-MM-YYYY
+  const slashMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
+  if (slashMatch) {
+    let p1 = parseInt(slashMatch[1], 10);
+    let p2 = parseInt(slashMatch[2], 10);
+    let y = parseInt(slashMatch[3], 10);
+    if (y < 100) y += 2000;
+    let d, m;
+    if (p1 > 12) {
+      d = p1;
+      m = p2;
+    } else if (p2 > 12) {
+      m = p1;
+      d = p2;
+    } else {
+      // Default: DD/MM/YYYY
+      d = p1;
+      m = p2;
+    }
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2000 && y <= 2100) {
+      return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+    }
+  }
+
+  // 5. Fallback ISO or standard Date string
+  const dt = new Date(str);
+  if (!isNaN(dt.getTime())) {
+    if (str.includes('Z')) {
+      return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(), 0, 0, 0, 0));
+    }
+    return new Date(Date.UTC(dt.getFullYear(), dt.getMonth(), dt.getDate(), 0, 0, 0, 0));
+  }
+
+  return null;
+};
+
+// Flexible column name matching
+const isNameKey = (k) => ['name', 'payout name', 'payoutname', 'payout_name'].includes(k);
+const isAmountKey = (k) => ['amount', 'payment amount', 'amount (usd)', 'usd', 'amount_usd'].includes(k);
+const isDateKey = (k) => [
+  'date',
+  'payment date',
+  'paymentdate',
+  'payment_date',
+  'received date',
+  'receiveddate',
+  'received_date',
+  'date received',
+  'payment received date',
+  'date_received'
+].includes(k);
+
 const uploadPayments = async (req, res) => {
   try {
     if (!req.file) {
@@ -41,7 +137,7 @@ const uploadPayments = async (req, res) => {
 
     let results = [];
     try {
-      const workbook = XLSX.readFile(req.file.path, { cellDates: true });
+      const workbook = XLSX.readFile(req.file.path, { cellDates: false });
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       results = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
@@ -59,11 +155,11 @@ const uploadPayments = async (req, res) => {
       return res.status(400).json({ message: "The uploaded file is empty." });
     }
 
-    // Check headers on first row
+    // Check headers on first row with flexible matching
     const firstRowKeys = Object.keys(results[0]).map(k => k.trim().toLowerCase());
-    const hasNameHeader = firstRowKeys.some(k => k === 'name');
-    const hasAmountHeader = firstRowKeys.some(k => k === 'amount');
-    const hasDateHeader = firstRowKeys.some(k => k === 'date');
+    const hasNameHeader = firstRowKeys.some(isNameKey);
+    const hasAmountHeader = firstRowKeys.some(isAmountKey);
+    const hasDateHeader = firstRowKeys.some(isDateKey);
 
     if (!hasNameHeader || !hasAmountHeader || !hasDateHeader) {
       if (req.file && fs.existsSync(req.file.path)) {
@@ -85,53 +181,50 @@ const uploadPayments = async (req, res) => {
 
       for (const key of Object.keys(row)) {
         const lower = key.trim().toLowerCase();
-        if (lower === 'name') name = String(row[key]).trim();
-        else if (lower === 'amount') amountRaw = row[key];
-        else if (lower === 'date') dateRaw = row[key];
+        if (isNameKey(lower)) name = String(row[key]).trim();
+        else if (isAmountKey(lower)) amountRaw = row[key];
+        else if (isDateKey(lower)) dateRaw = row[key];
       }
 
-      if (!name || amountRaw === undefined || amountRaw === null || amountRaw === '' || dateRaw === undefined || dateRaw === null || dateRaw === '') {
-        const reason = "Missing required fields";
-        errors.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw || '', reason });
-        items.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw || '', status: 'Failed', claimedBy: 'N/A', reason });
+      if (!name || amountRaw === undefined || amountRaw === null || String(amountRaw).trim() === '' || dateRaw === undefined || dateRaw === null || String(dateRaw).trim() === '') {
+        const reason = "Missing required fields (Name, Amount, or Date is empty)";
+        errors.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw ? String(dateRaw) : 'N/A', reason });
+        items.push({ rowNum: processed, name: name || '', amount: amountRaw || '', date: dateRaw ? String(dateRaw) : 'N/A', status: 'Failed', claimedBy: 'N/A', reason });
         continue;
       }
 
       const amount = parseFloat(amountRaw.toString().replace(/,/g, '').trim());
       if (isNaN(amount) || amount <= 0) {
         const reason = "Invalid amount format";
-        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
-        items.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, status: 'Failed', claimedBy: 'N/A', reason });
+        errors.push({ rowNum: processed, name, amount: amountRaw, date: String(dateRaw), reason });
+        items.push({ rowNum: processed, name, amount: amountRaw, date: String(dateRaw), status: 'Failed', claimedBy: 'N/A', reason });
         continue;
       }
 
       // Parse date: support JS Date, Excel serial number, DD/MM/YYYY, or ISO string
-      let paymentDate;
-      if (dateRaw instanceof Date) {
-        paymentDate = dateRaw;
-      } else if (typeof dateRaw === 'number') {
-        paymentDate = new Date((dateRaw - (25567 + 2)) * 86400 * 1000);
-      } else if (typeof dateRaw === 'string' && dateRaw.includes('/')) {
-        const parts = dateRaw.trim().split('/');
-        if (parts.length === 3) {
-          paymentDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}T00:00:00Z`);
-        }
-      } else {
-        paymentDate = new Date(dateRaw);
-      }
+      const paymentDate = parseCalendarDate(dateRaw);
 
       if (!paymentDate || isNaN(paymentDate.getTime())) {
-        const reason = "Invalid date format";
-        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
-        items.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, status: 'Failed', claimedBy: 'N/A', reason });
+        const reason = "Invalid or empty date format";
+        errors.push({ rowNum: processed, name, amount: amountRaw, date: String(dateRaw || 'N/A'), reason });
+        items.push({ rowNum: processed, name, amount: amountRaw, date: String(dateRaw || 'N/A'), status: 'Failed', claimedBy: 'N/A', reason });
         continue;
       }
 
-      // Calculate maturity
+      const dateISOStr = paymentDate.toISOString().split('T')[0];
+
+      // Calculate maturity at UTC midnight
       const dayOfWeek = paymentDate.getUTCDay();
-      const offsetDays = settingsMap[dayOfWeek] || 2;
+      const offsetDays = settingsMap[dayOfWeek] !== undefined ? settingsMap[dayOfWeek] : 2;
       const maturityDate = new Date(paymentDate);
       maturityDate.setUTCDate(maturityDate.getUTCDate() + offsetDays);
+
+      if (!maturityDate || isNaN(maturityDate.getTime())) {
+        const reason = "Failed to calculate maturity date";
+        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateISOStr, reason });
+        items.push({ rowNum: processed, name, amount: amountRaw, date: dateISOStr, status: 'Failed', claimedBy: 'N/A', reason });
+        continue;
+      }
 
       const payoutName = await PayoutName.findOne({ nameLower: name.toLowerCase() })
         .populate('allocatedTo', 'email profile')
@@ -162,12 +255,12 @@ const uploadPayments = async (req, res) => {
 
         if (payoutName.status !== 'claimed') {
           const reason = `Payout name is not claimed (Current status: ${payoutName.status})`;
-          errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
+          errors.push({ rowNum: processed, name, amount: amountRaw, date: dateISOStr, reason });
           items.push({
             rowNum: processed,
             name,
             amount: amountRaw,
-            date: dateRaw,
+            date: dateISOStr,
             status: 'Failed',
             claimedBy: claimedByLabel,
             reason
@@ -175,9 +268,10 @@ const uploadPayments = async (req, res) => {
         } else {
           if (payoutName.paymentStatus === 'received' || payoutName.paymentStatus === 'matured') {
             payoutName.amount = (payoutName.amount || 0) + amount;
+            // Always set paymentReceivedDate to paymentDate (never null)
+            payoutName.paymentReceivedDate = paymentDate;
             if (!payoutName.maturityDate || maturityDate > payoutName.maturityDate) {
               payoutName.maturityDate = maturityDate;
-              payoutName.paymentReceivedDate = paymentDate;
             }
             payoutName.paymentStatus = 'received';
           } else {
@@ -186,6 +280,15 @@ const uploadPayments = async (req, res) => {
             payoutName.maturityDate = maturityDate;
             payoutName.paymentStatus = 'received';
           }
+
+          // Strict guarantee: neither date can ever be null or invalid
+          if (!payoutName.paymentReceivedDate || isNaN(payoutName.paymentReceivedDate.getTime())) {
+            payoutName.paymentReceivedDate = paymentDate;
+          }
+          if (!payoutName.maturityDate || isNaN(payoutName.maturityDate.getTime())) {
+            payoutName.maturityDate = maturityDate;
+          }
+
           await payoutName.save();
 
           try {
@@ -228,7 +331,7 @@ const uploadPayments = async (req, res) => {
                 { label: "Payout Name", value: payoutName.name },
                 { label: "Amount", value: `$${amount.toFixed(2)}` },
                 { label: "Payment Status", value: payoutName.paymentStatus },
-                ...(payoutName.maturityDate ? [{ label: "Maturity Date", value: new Date(payoutName.maturityDate).toLocaleDateString() }] : [])
+                ...(payoutName.maturityDate ? [{ label: "Maturity Date", value: new Date(payoutName.maturityDate).toLocaleDateString('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' }) }] : [])
               ]
             });
             telegramService.sendToUser(clientUserId, teleMsg).catch(() => {});
@@ -239,7 +342,7 @@ const uploadPayments = async (req, res) => {
             rowNum: processed,
             name,
             amount: amountRaw,
-            date: dateRaw,
+            date: dateISOStr,
             status: 'Success',
             claimedBy: claimedByLabel,
             reason: 'Payment applied successfully'
@@ -247,12 +350,12 @@ const uploadPayments = async (req, res) => {
         }
       } else {
         const reason = "Payout name not found in database";
-        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateRaw, reason });
+        errors.push({ rowNum: processed, name, amount: amountRaw, date: dateISOStr, reason });
         items.push({
           rowNum: processed,
           name,
           amount: amountRaw,
-          date: dateRaw,
+          date: dateISOStr,
           status: 'Failed',
           claimedBy: 'Not Found in DB',
           reason
