@@ -486,9 +486,9 @@ const downloadUploadReport = async (req, res) => {
     const header = csvStringifier.getHeaderString();
     const recordsCsv = csvStringifier.stringifyRecords(records);
 
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="upload_report_${history._id}.csv"`);
-    res.send(header + recordsCsv);
+    res.send('\uFEFF' + header + recordsCsv);
 
   } catch (error) {
     console.error("Download upload report error:", error);

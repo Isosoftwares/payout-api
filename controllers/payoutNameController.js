@@ -57,8 +57,8 @@ const uploadPayoutNames = async (req, res) => {
       for (const key of keys) {
         const lowerKey = key.trim().toLowerCase();
         if (lowerKey === "name") name = String(row[key]).trim();
-        else if (lowerKey === "routing number" || lowerKey === "routingnumber") routingNumber = String(row[key]).trim();
-        else if (lowerKey === "account number" || lowerKey === "accountnumber") accountNumber = String(row[key]).trim();
+        else if (lowerKey === "routing number" || lowerKey === "routingnumber") routingNumber = String(row[key]).replace(/^="?/, '').replace(/"?$/, '').trim();
+        else if (lowerKey === "account number" || lowerKey === "accountnumber") accountNumber = String(row[key]).replace(/^="?/, '').replace(/"?$/, '').trim();
         else if (lowerKey === "client" || lowerKey === "client email" || lowerKey === "clientemail" || lowerKey === "email") rowClientEmail = String(row[key]).trim();
       }
 
@@ -1389,9 +1389,9 @@ const uploadBacklogNames = async (req, res) => {
         if (lowerKey === "name" || lowerKey === "payout name" || lowerKey === "payoutname") {
           name = String(row[key]).trim();
         } else if (lowerKey === "routing number" || lowerKey === "routingnumber" || lowerKey === "routing") {
-          routingNumber = String(row[key]).trim();
+          routingNumber = String(row[key]).replace(/^="?/, '').replace(/"?$/, '').trim();
         } else if (lowerKey === "account number" || lowerKey === "accountnumber" || lowerKey === "account") {
-          accountNumber = String(row[key]).trim();
+          accountNumber = String(row[key]).replace(/^="?/, '').replace(/"?$/, '').trim();
         }
       }
 
