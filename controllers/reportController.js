@@ -1,5 +1,7 @@
+const mongoose = require("mongoose");
 const PayoutName = require("../models/PayoutName");
 const User = require("../models/User");
+const Subaccount = require("../models/Subaccount");
 
 // @desc    Get daily report for payments received or maturing on a specific date
 // @route   GET /api/reports/daily
@@ -37,14 +39,47 @@ const getDailyReport = async (req, res) => {
 
     const query = {};
 
+    // Helper to build ID matches for ObjectId and string so both MongoDB aggregation and find work
+    const toIdMatches = (id) => {
+      const matches = [];
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        matches.push(new mongoose.Types.ObjectId(id));
+      }
+      matches.push(String(id));
+      return matches;
+    };
+
     // Role-based client constraint
     if (req.user.role === "client") {
-      query.allocatedTo = req.user.id;
+      const clientMatches = toIdMatches(req.user.id);
+      const subaccounts = await Subaccount.find({ clientId: { $in: clientMatches } }).select("_id");
+      const subaccountIds = subaccounts.map((s) => s._id);
+
+      if (subaccountIds.length > 0) {
+        query.$or = [
+          { allocatedTo: { $in: clientMatches } },
+          { claimedForSubaccount: { $in: subaccountIds } },
+        ];
+      } else {
+        query.allocatedTo = { $in: clientMatches };
+      }
     } else if (req.user.role === "subaccount") {
-      query.claimedForSubaccount = req.user.id;
+      const subMatches = toIdMatches(req.user.id);
+      query.claimedForSubaccount = { $in: subMatches };
     } else if (req.user.role === "admin") {
       if (clientId && clientId !== "all") {
-        query.allocatedTo = clientId;
+        const clientMatches = toIdMatches(clientId);
+        const subaccounts = await Subaccount.find({ clientId: { $in: clientMatches } }).select("_id");
+        const subaccountIds = subaccounts.map((s) => s._id);
+
+        if (subaccountIds.length > 0) {
+          query.$or = [
+            { allocatedTo: { $in: clientMatches } },
+            { claimedForSubaccount: { $in: subaccountIds } },
+          ];
+        } else {
+          query.allocatedTo = { $in: clientMatches };
+        }
       }
     }
 
