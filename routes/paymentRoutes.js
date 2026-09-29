@@ -9,7 +9,9 @@ const {
   getMaturitySettings, 
   updateMaturitySettings,
   getUploadHistories,
-  downloadUploadReport
+  downloadUploadReport,
+  getReversalPreview,
+  reversePaymentUpload
 } = require("../controllers/paymentController");
 
 // Ensure uploads directory exists
@@ -44,5 +46,7 @@ router.get("/maturity-settings", authenticateToken, isAdmin, getMaturitySettings
 router.put("/maturity-settings", authenticateToken, isAdmin, updateMaturitySettings);
 router.get("/upload-histories", authenticateToken, isAdmin, getUploadHistories);
 router.get("/upload-histories/:id/download", authenticateToken, isAdmin, downloadUploadReport);
+router.get("/upload-histories/:id/reversal-preview", authenticateToken, isAdmin, getReversalPreview);
+router.post("/upload-histories/:id/reverse", authenticateToken, isAdmin, reversePaymentUpload);
 
 module.exports = router;

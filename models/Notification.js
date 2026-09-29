@@ -4,7 +4,7 @@ const notificationSchema = new mongoose.Schema({
   recipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   type: { 
     type: String, 
-    enum: ['payout_name_created', 'deposit', 'payout'], 
+    enum: ['payout_name_created', 'deposit', 'payout', 'reversal'], 
     required: true 
   },
   title: { type: String, required: true },

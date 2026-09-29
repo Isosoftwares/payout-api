@@ -15,6 +15,7 @@ const payoutNameLogSchema = new mongoose.Schema(
         "allocated",
         "claimed",
         "payment_received",
+        "payment_reversed",
         "matured",
         "paid",
         "narration_note",

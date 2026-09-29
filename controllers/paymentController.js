@@ -428,10 +428,275 @@ const getUploadHistories = async (req, res) => {
   try {
     const histories = await PaymentUploadHistory.find({})
       .populate('uploadedBy', 'profile email')
+      .populate('reversedBy', 'profile email')
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, data: histories });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+const getReversalPreview = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const history = await PaymentUploadHistory.findById(id)
+      .populate('uploadedBy', 'profile email')
+      .populate('reversedBy', 'profile email');
+
+    if (!history) {
+      return res.status(404).json({ message: "Upload history not found" });
+    }
+
+    const diffMs = Date.now() - new Date(history.createdAt).getTime();
+    const diffHours = diffMs / (1000 * 60 * 60);
+    const isExpired = diffHours > 48;
+    const hoursRemaining = Math.max(0, 48 - diffHours);
+
+    const successItems = (history.items || []).filter(item => item.status === 'Success');
+    const previewItems = [];
+    let totalReversalAmount = 0;
+    let paidCount = 0;
+    let alreadyZeroCount = 0;
+    const warnings = [];
+
+    for (const item of successItems) {
+      const itemAmount = parseFloat(String(item.amount).replace(/,/g, '').trim()) || 0;
+      totalReversalAmount += itemAmount;
+
+      const payoutName = await PayoutName.findOne({ nameLower: item.name.toLowerCase() })
+        .populate('allocatedTo', 'profile email');
+
+      let currentAmount = 0;
+      let currentStatus = 'not_found';
+      let newAmount = 0;
+      let newStatus = 'not_received';
+      let warning = null;
+      let clientLabel = item.claimedBy || 'N/A';
+
+      if (payoutName) {
+        currentAmount = payoutName.amount || 0;
+        currentStatus = payoutName.paymentStatus || 'not_received';
+        newAmount = Math.max(0, currentAmount - itemAmount);
+
+        if (currentStatus === 'paid') {
+          paidCount++;
+          warning = 'Already marked as PAID';
+        } else if (currentAmount === 0) {
+          alreadyZeroCount++;
+          warning = 'Current amount is already $0.00';
+        } else if (currentAmount < itemAmount) {
+          warning = `Current amount ($${currentAmount.toFixed(2)}) is less than upload amount ($${itemAmount.toFixed(2)})`;
+        }
+
+        if (newAmount === 0) {
+          newStatus = 'not_received';
+        } else {
+          newStatus = currentStatus;
+        }
+
+        if (payoutName.allocatedTo) {
+          const client = payoutName.allocatedTo;
+          clientLabel = client.profile?.company || client.profile?.companyName || [client.profile?.firstName, client.profile?.lastName].filter(Boolean).join(' ') || client.email;
+        }
+      } else {
+        warning = 'Payout name not found in database';
+      }
+
+      previewItems.push({
+        rowNum: item.rowNum,
+        name: item.name,
+        uploadAmount: itemAmount,
+        uploadDate: item.date,
+        currentAmount,
+        newAmount,
+        currentStatus,
+        newStatus,
+        clientLabel,
+        warning
+      });
+    }
+
+    if (history.isReversed) {
+      warnings.push(`This upload was already reversed on ${new Date(history.reversedAt).toLocaleString()} by ${history.reversedBy?.email || 'admin'}.`);
+    } else if (isExpired) {
+      warnings.push(`The 48-hour reversal window has expired (Uploaded ${Math.floor(diffHours)} hours ago).`);
+    }
+
+    if (paidCount > 0) {
+      warnings.push(`${paidCount} payout name(s) have already been marked as PAID.`);
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        historyId: history._id,
+        fileName: history.fileName,
+        createdAt: history.createdAt,
+        uploadedBy: history.uploadedBy,
+        diffHours,
+        hoursRemaining: hoursRemaining.toFixed(1),
+        isExpired,
+        isReversed: history.isReversed || false,
+        reversedAt: history.reversedAt,
+        reversedBy: history.reversedBy,
+        reversalReason: history.reversalReason,
+        totalProcessed: history.totalProcessed,
+        totalMatched: history.totalMatched,
+        totalReversalAmount,
+        itemsCount: previewItems.length,
+        items: previewItems,
+        warnings,
+        canReverse: !history.isReversed && !isExpired
+      }
+    });
+
+  } catch (error) {
+    console.error("Reversal preview error:", error);
+    res.status(500).json({ message: "Server error generating reversal preview", error: error.message });
+  }
+};
+
+const reversePaymentUpload = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim() || reason.trim().length < 3) {
+      return res.status(400).json({ message: "Please provide a valid reason for the reversal (minimum 3 characters)." });
+    }
+
+    const history = await PaymentUploadHistory.findById(id);
+    if (!history) {
+      return res.status(404).json({ message: "Upload history not found" });
+    }
+
+    if (history.isReversed) {
+      return res.status(400).json({
+        message: `This upload has already been reversed on ${new Date(history.reversedAt).toLocaleString()}. Reversals can only be performed once.`
+      });
+    }
+
+    const diffMs = Date.now() - new Date(history.createdAt).getTime();
+    const diffHours = diffMs / (1000 * 60 * 60);
+    if (diffHours > 48) {
+      return res.status(400).json({
+        message: "Cannot reverse upload: Reversal window expired (Uploads can only be reversed within 48 hours)."
+      });
+    }
+
+    const successItems = (history.items || []).filter(item => item.status === 'Success');
+    if (successItems.length === 0) {
+      return res.status(400).json({ message: "No successful payments in this upload to reverse." });
+    }
+
+    let reversedCount = 0;
+    let totalReversedAmount = 0;
+    const reversalTime = new Date();
+
+    for (const item of successItems) {
+      const itemAmount = parseFloat(String(item.amount).replace(/,/g, '').trim()) || 0;
+      if (itemAmount <= 0) continue;
+
+      const payoutName = await PayoutName.findOne({ nameLower: item.name.toLowerCase() });
+      if (!payoutName) continue;
+
+      const previousAmount = payoutName.amount || 0;
+      const newAmount = Math.max(0, previousAmount - itemAmount);
+
+      payoutName.amount = newAmount;
+
+      if (newAmount === 0) {
+        payoutName.paymentStatus = 'not_received';
+        payoutName.paymentReceivedDate = null;
+        payoutName.maturityDate = null;
+      } else {
+        // If remaining amount > 0, find prior payment_received log before this upload
+        const priorPaymentLog = await PayoutNameLog.findOne({
+          payoutName: payoutName._id,
+          action: 'payment_received',
+          timestamp: { $lt: history.createdAt }
+        }).sort({ timestamp: -1 });
+
+        if (priorPaymentLog && priorPaymentLog.paymentDate) {
+          payoutName.paymentReceivedDate = priorPaymentLog.paymentDate;
+          payoutName.maturityDate = priorPaymentLog.maturityDate;
+          payoutName.paymentStatus = priorPaymentLog.maturityDate && new Date(priorPaymentLog.maturityDate) <= new Date() ? 'matured' : 'received';
+        }
+      }
+
+      await payoutName.save();
+
+      // Log reversal event on PayoutName
+      await PayoutNameLog.create({
+        payoutName: payoutName._id,
+        action: 'payment_reversed',
+        amount: itemAmount,
+        paymentStatus: payoutName.paymentStatus,
+        paymentDate: payoutName.paymentReceivedDate,
+        maturityDate: payoutName.maturityDate,
+        narration: `Payment upload reversed (${history.fileName}): ${reason.trim()}`,
+        performedBy: req.user._id || null,
+        performedByRole: req.user.role || 'admin',
+        timestamp: reversalTime
+      });
+
+      // Update client user balance & send notifications
+      const clientUserId = payoutName.allocatedTo;
+      if (clientUserId) {
+        await User.findByIdAndUpdate(clientUserId, {
+          $inc: { totalReceivedUSD: -itemAmount }
+        });
+
+        await Notification.create({
+          recipient: clientUserId,
+          type: 'reversal',
+          title: 'Payment Upload Reversed',
+          message: `A payment of $${itemAmount.toFixed(2)} for ${payoutName.name} (${history.fileName}) was reversed. Reason: ${reason.trim()}`,
+          link: '/client/payout-names'
+        }).catch(() => {});
+
+        const teleMsg = telegramService.formatNotification({
+          icon: "⚠️",
+          title: "Payment Reversed",
+          message: `A payment of <b>$${itemAmount.toFixed(2)}</b> for payout name <b>${payoutName.name}</b> from file <i>${history.fileName}</i> was reversed by admin.\n<b>Reason:</b> ${reason.trim()}`,
+          details: [
+            { label: "Payout Name", value: payoutName.name },
+            { label: "Deducted Amount", value: `-$${itemAmount.toFixed(2)}` },
+            { label: "Remaining Amount", value: `$${newAmount.toFixed(2)}` },
+            { label: "Current Status", value: payoutName.paymentStatus }
+          ]
+        });
+        telegramService.sendToUser(clientUserId, teleMsg).catch(() => {});
+      }
+
+      reversedCount++;
+      totalReversedAmount += itemAmount;
+    }
+
+    // Mark upload history as permanently reversed
+    history.isReversed = true;
+    history.reversedAt = reversalTime;
+    history.reversedBy = req.user._id;
+    history.reversalReason = reason.trim();
+    history.reversalSummary = {
+      reversedCount,
+      totalReversedAmount
+    };
+    await history.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Reversal completed successfully. ${reversedCount} payment(s) reversed totaling $${totalReversedAmount.toFixed(2)}.`,
+      data: {
+        reversedCount,
+        totalReversedAmount,
+        history
+      }
+    });
+
+  } catch (error) {
+    console.error("Payment upload reversal error:", error);
+    res.status(500).json({ message: "Server error during reversal", error: error.message });
   }
 };
 
@@ -501,5 +766,7 @@ module.exports = {
   getMaturitySettings,
   updateMaturitySettings,
   getUploadHistories,
-  downloadUploadReport
+  downloadUploadReport,
+  getReversalPreview,
+  reversePaymentUpload
 };

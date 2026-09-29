@@ -37,7 +37,29 @@ const paymentUploadHistorySchema = new mongoose.Schema({
     amount: String,
     date: String,
     reason: String
-  }]
+  }],
+  isReversed: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  reversedAt: {
+    type: Date,
+    default: null
+  },
+  reversedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null
+  },
+  reversalReason: {
+    type: String,
+    default: null
+  },
+  reversalSummary: {
+    reversedCount: Number,
+    totalReversedAmount: Number
+  }
 },{
   timestamps: true,
   suppressReservedKeysWarning: true
