@@ -800,6 +800,164 @@ const setDefaultPaymentMethod = asyncHandler(async (req, res) => {
   res.status(response.statusCode).json(response);
 });
 
+// ================================
+// ADMIN CLIENT PAYMENT METHODS
+// ================================
+
+// Admin adds a payment method for a client
+const addClientPaymentMethod = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const user = await User.findById(id);
+
+  if (!user) {
+    const response = formatResponse(false, null, 'Client not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const { type, details, isDefault } = req.body;
+
+  if (!type || !['mpesa', 'bank', 'crypto'].includes(type)) {
+    const response = formatResponse(false, null, 'Valid payment method type is required (mpesa, bank, crypto)', 400);
+    return res.status(response.statusCode).json(response);
+  }
+
+  if (!details || typeof details !== 'object') {
+    const response = formatResponse(false, null, 'Valid payment details are required', 400);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const makeDefault = Boolean(isDefault) || user.paymentMethods.length === 0;
+
+  if (makeDefault) {
+    user.paymentMethods.forEach(method => {
+      method.isDefault = false;
+    });
+  }
+
+  user.paymentMethods.push({
+    type,
+    details,
+    isDefault: makeDefault
+  });
+
+  await user.save();
+
+  const response = formatResponse(true, user.paymentMethods, 'Payment method added successfully');
+  res.status(response.statusCode).json(response);
+});
+
+// Admin edits a client payment method
+const editClientPaymentMethod = asyncHandler(async (req, res) => {
+  const { id, methodId } = req.params;
+  const user = await User.findById(id);
+
+  if (!user) {
+    const response = formatResponse(false, null, 'Client not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const { type, details, isDefault } = req.body;
+
+  const methodIndex = user.paymentMethods.findIndex(
+    method => method._id.toString() === methodId
+  );
+
+  if (methodIndex === -1) {
+    const response = formatResponse(false, null, 'Payment method not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  if (type) {
+    if (!['mpesa', 'bank', 'crypto'].includes(type)) {
+      const response = formatResponse(false, null, 'Valid payment method type is required', 400);
+      return res.status(response.statusCode).json(response);
+    }
+    user.paymentMethods[methodIndex].type = type;
+  }
+
+  if (details && typeof details === 'object') {
+    user.paymentMethods[methodIndex].details = details;
+  }
+
+  if (isDefault !== undefined) {
+    if (isDefault) {
+      user.paymentMethods.forEach(m => { m.isDefault = false; });
+      user.paymentMethods[methodIndex].isDefault = true;
+    } else {
+      user.paymentMethods[methodIndex].isDefault = false;
+    }
+  }
+
+  await user.save();
+
+  const response = formatResponse(true, user.paymentMethods, 'Payment method updated successfully');
+  res.status(response.statusCode).json(response);
+});
+
+// Admin deletes a client payment method
+const deleteClientPaymentMethod = asyncHandler(async (req, res) => {
+  const { id, methodId } = req.params;
+  const user = await User.findById(id);
+
+  if (!user) {
+    const response = formatResponse(false, null, 'Client not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const methodIndex = user.paymentMethods.findIndex(
+    method => method._id.toString() === methodId
+  );
+
+  if (methodIndex === -1) {
+    const response = formatResponse(false, null, 'Payment method not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const wasDefault = user.paymentMethods[methodIndex].isDefault;
+
+  user.paymentMethods.splice(methodIndex, 1);
+
+  if (wasDefault && user.paymentMethods.length > 0) {
+    user.paymentMethods[0].isDefault = true;
+  }
+
+  await user.save();
+
+  const response = formatResponse(true, user.paymentMethods, 'Payment method deleted successfully');
+  res.status(response.statusCode).json(response);
+});
+
+// Admin sets a client payment method as default
+const setDefaultClientPaymentMethod = asyncHandler(async (req, res) => {
+  const { id, methodId } = req.params;
+  const user = await User.findById(id);
+
+  if (!user) {
+    const response = formatResponse(false, null, 'Client not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const methodIndex = user.paymentMethods.findIndex(
+    method => method._id.toString() === methodId
+  );
+
+  if (methodIndex === -1) {
+    const response = formatResponse(false, null, 'Payment method not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  user.paymentMethods.forEach(method => {
+    method.isDefault = false;
+  });
+
+  user.paymentMethods[methodIndex].isDefault = true;
+
+  await user.save();
+
+  const response = formatResponse(true, user.paymentMethods, 'Default payment method updated');
+  res.status(response.statusCode).json(response);
+});
+
 module.exports = {
   // Admin user management
   getAllUsers,
@@ -811,6 +969,10 @@ module.exports = {
   toggleSuspendUser,
   addBalance,
   getUserStatistics,
+  addClientPaymentMethod,
+  editClientPaymentMethod,
+  deleteClientPaymentMethod,
+  setDefaultClientPaymentMethod,
   
   // User profile management
   getOwnProfile,

@@ -27,6 +27,12 @@ router.post('/:id/reset-password', authenticateToken, isAdmin, userController.re
 router.post('/:id/toggle-suspend', authenticateToken, isAdmin, userController.toggleSuspendUser);
 router.post('/:id/add-balance', authenticateToken, isAdmin, userController.addBalance);
 
+// Admin managing client payment methods
+router.post('/:id/payment-methods', authenticateToken, isAdmin, userController.addClientPaymentMethod);
+router.put('/:id/payment-methods/:methodId', authenticateToken, isAdmin, userController.editClientPaymentMethod);
+router.delete('/:id/payment-methods/:methodId', authenticateToken, isAdmin, userController.deleteClientPaymentMethod);
+router.patch('/:id/payment-methods/:methodId/default', authenticateToken, isAdmin, userController.setDefaultClientPaymentMethod);
+
 // ================================
 // USER PROFILE ROUTES (AUTHENTICATED)
 // ================================
