@@ -2,6 +2,7 @@ const PayoutName = require('../models/PayoutName');
 const PayoutNameLog = require('../models/PayoutNameLog');
 const MaturitySetting = require('../models/MaturitySetting');
 const PaymentUploadHistory = require('../models/PaymentUploadHistory');
+const PaymentRecord = require('../models/PaymentRecord');
 const XLSX = require('xlsx');
 const fs = require('fs');
 const { createObjectCsvStringifier } = require('csv-writer');
@@ -170,6 +171,7 @@ const uploadPayments = async (req, res) => {
 
     const items = [];
     const errors = [];
+    const paymentRecordsToCreate = [];
     let processed = 0;
     let matched = 0;
 
@@ -338,6 +340,23 @@ const uploadPayments = async (req, res) => {
           }
 
           matched++;
+          paymentRecordsToCreate.push({
+            payoutName: payoutName._id,
+            name: payoutName.name,
+            nameLower: payoutName.nameLower || payoutName.name.toLowerCase(),
+            routingNumber: payoutName.routingNumber || '',
+            accountNumber: payoutName.accountNumber || '',
+            allocatedTo: payoutName.allocatedTo?._id || payoutName.allocatedTo || null,
+            claimedForSubaccount: payoutName.claimedForSubaccount?._id || payoutName.claimedForSubaccount || null,
+            amount: amount,
+            paymentReceivedDate: paymentDate,
+            maturityDate: maturityDate,
+            paymentStatus: 'received',
+            uploadRowNumber: processed,
+            uploadFileName: req.file?.originalname || '',
+            isReversed: false,
+          });
+
           items.push({
             rowNum: processed,
             name,
@@ -377,6 +396,17 @@ const uploadPayments = async (req, res) => {
       items: items,
       errors: errors
     });
+
+    if (paymentRecordsToCreate.length > 0) {
+      paymentRecordsToCreate.forEach((pr) => {
+        pr.uploadHistoryId = history._id;
+      });
+      try {
+        await PaymentRecord.insertMany(paymentRecordsToCreate);
+      } catch (prErr) {
+        console.error('Error inserting PaymentRecords:', prErr);
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -593,6 +623,16 @@ const reversePaymentUpload = async (req, res) => {
     let totalReversedAmount = 0;
     const reversalTime = new Date();
 
+    // Mark all matching transaction ledger records as reversed
+    try {
+      await PaymentRecord.updateMany(
+        { uploadHistoryId: history._id },
+        { $set: { isReversed: true, reversedAt: reversalTime } }
+      );
+    } catch (prRevErr) {
+      console.error('Error updating PaymentRecords on reversal:', prRevErr);
+    }
+
     for (const item of successItems) {
       const itemAmount = parseFloat(String(item.amount).replace(/,/g, '').trim()) || 0;
       if (itemAmount <= 0) continue;
@@ -761,8 +801,212 @@ const downloadUploadReport = async (req, res) => {
   }
 };
 
+// @desc    Add single payment to a payout name manually (no CSV required)
+// @route   POST /api/payments/single
+// @access  Private (Admin only)
+const addSinglePayment = async (req, res) => {
+  try {
+    const { payoutNameId, name, amount, paymentDate: dateRaw, maturityDate: maturityRaw, clientId, narration } = req.body;
+
+    if (!payoutNameId && !name) {
+      return res.status(400).json({ message: "Payout name ID or name is required." });
+    }
+
+    const numAmount = parseFloat(String(amount || '').replace(/,/g, '').trim());
+    if (isNaN(numAmount) || numAmount <= 0) {
+      return res.status(400).json({ message: "Please provide a valid payment amount greater than 0." });
+    }
+
+    // Find payout name
+    let query = {};
+    if (payoutNameId) {
+      query._id = payoutNameId;
+    } else {
+      query.nameLower = name.trim().toLowerCase();
+    }
+
+    const payoutName = await PayoutName.findOne(query)
+      .populate('allocatedTo', 'email profile')
+      .populate('claimedForSubaccount', 'username');
+
+    if (!payoutName) {
+      return res.status(404).json({ message: "Payout name not found." });
+    }
+
+    // Determine target client
+    let targetClient = payoutName.allocatedTo;
+
+    // Handle allocation / claiming if needed
+    if (payoutName.status === 'available') {
+      if (!clientId) {
+        return res.status(400).json({ 
+          message: "This payout name is currently available (unallocated). Please select a client to assign this payment to." 
+        });
+      }
+      const clientDoc = await User.findById(clientId);
+      if (!clientDoc || clientDoc.role !== 'client') {
+        return res.status(400).json({ message: "Selected client was not found." });
+      }
+      payoutName.allocatedTo = clientDoc._id;
+      payoutName.status = 'claimed';
+      payoutName.claimedAt = new Date();
+      targetClient = clientDoc;
+    } else if (payoutName.status === 'allocated') {
+      payoutName.status = 'claimed';
+      payoutName.claimedAt = payoutName.claimedAt || new Date();
+    }
+
+    // Parse payment date
+    let paymentDate = dateRaw ? parseCalendarDate(dateRaw) : new Date();
+    if (!paymentDate || isNaN(paymentDate.getTime())) {
+      paymentDate = new Date();
+    }
+    paymentDate = new Date(Date.UTC(paymentDate.getUTCFullYear(), paymentDate.getUTCMonth(), paymentDate.getUTCDate(), 0, 0, 0, 0));
+
+    // Calculate or parse maturity date
+    let finalMaturityDate = null;
+    if (maturityRaw) {
+      finalMaturityDate = parseCalendarDate(maturityRaw);
+    }
+
+    if (!finalMaturityDate || isNaN(finalMaturityDate.getTime())) {
+      const settings = await MaturitySetting.find();
+      const settingsMap = {};
+      settings.forEach(s => settingsMap[s.dayOfWeek] = s.offsetDays);
+      const dayOfWeek = paymentDate.getUTCDay();
+      const offsetDays = settingsMap[dayOfWeek] !== undefined ? settingsMap[dayOfWeek] : 2;
+      finalMaturityDate = new Date(paymentDate);
+      finalMaturityDate.setUTCDate(finalMaturityDate.getUTCDate() + offsetDays);
+    } else {
+      finalMaturityDate = new Date(Date.UTC(finalMaturityDate.getUTCFullYear(), finalMaturityDate.getUTCMonth(), finalMaturityDate.getUTCDate(), 0, 0, 0, 0));
+    }
+
+    // Apply amount to payout name
+    if (payoutName.paymentStatus === 'received' || payoutName.paymentStatus === 'matured') {
+      payoutName.amount = (payoutName.amount || 0) + numAmount;
+      payoutName.paymentReceivedDate = paymentDate;
+      if (!payoutName.maturityDate || finalMaturityDate > payoutName.maturityDate) {
+        payoutName.maturityDate = finalMaturityDate;
+      }
+      payoutName.paymentStatus = 'received';
+    } else {
+      payoutName.amount = numAmount;
+      payoutName.paymentReceivedDate = paymentDate;
+      payoutName.maturityDate = finalMaturityDate;
+      payoutName.paymentStatus = 'received';
+    }
+
+    await payoutName.save();
+
+    // Create Activity Log
+    const newLog = await PayoutNameLog.create({
+      payoutName: payoutName._id,
+      action: 'payment_received',
+      amount: numAmount,
+      paymentStatus: 'received',
+      paymentDate: paymentDate,
+      maturityDate: finalMaturityDate,
+      narration: narration && narration.trim() 
+        ? narration.trim() 
+        : `Manual single payment received: $${numAmount.toFixed(2)}`,
+      performedBy: req.user?._id || req.user?.id || null,
+      performedByRole: 'admin',
+      timestamp: new Date()
+    });
+
+    // Create PaymentRecord for ledger
+    await PaymentRecord.create({
+      payoutName: payoutName._id,
+      name: payoutName.name,
+      nameLower: payoutName.nameLower || payoutName.name.toLowerCase(),
+      routingNumber: payoutName.routingNumber || '',
+      accountNumber: payoutName.accountNumber || '',
+      allocatedTo: payoutName.allocatedTo?._id || payoutName.allocatedTo || null,
+      claimedForSubaccount: payoutName.claimedForSubaccount?._id || payoutName.claimedForSubaccount || null,
+      amount: numAmount,
+      paymentReceivedDate: paymentDate,
+      maturityDate: finalMaturityDate,
+      paymentStatus: 'received',
+      uploadRowNumber: 1,
+      uploadFileName: 'Single Payment Entry',
+      isReversed: false,
+    });
+
+    // Resolve client label for upload history
+    let clientLabel = 'N/A';
+    if (targetClient) {
+      const email = targetClient.email || '';
+      const nameStr = targetClient.profile?.companyName || 
+        [targetClient.profile?.firstName, targetClient.profile?.lastName].filter(Boolean).join(' ') || 
+        email;
+      clientLabel = `${nameStr} (${email})`;
+    }
+
+    // Create PaymentUploadHistory so it appears in audit & reversal system
+    await PaymentUploadHistory.create({
+      uploadedBy: req.user?._id || req.user?.id,
+      fileName: `Manual Entry: ${payoutName.name} ($${numAmount.toFixed(2)})`,
+      totalProcessed: 1,
+      totalMatched: 1,
+      items: [{
+        rowNum: 1,
+        name: payoutName.name,
+        amount: numAmount.toFixed(2),
+        date: paymentDate.toISOString().split('T')[0],
+        status: 'Success',
+        claimedBy: clientLabel,
+        reason: narration ? `Manual payment: ${narration.trim()}` : 'Manual payment added via Payout Names'
+      }],
+      errors: []
+    });
+
+    // Update Client User metrics and dispatch notifications
+    const clientUserId = payoutName.allocatedTo?._id || payoutName.allocatedTo;
+    if (clientUserId) {
+      await User.findByIdAndUpdate(clientUserId, {
+        $inc: { totalReceivedUSD: numAmount }
+      });
+
+      await Notification.create({
+        recipient: clientUserId,
+        type: 'deposit',
+        title: 'Payment Received',
+        message: `A payment of $${numAmount.toFixed(2)} was received for payout name ${payoutName.name}.`,
+        link: '/client/payout-names'
+      });
+
+      const teleMsg = telegramService.formatNotification({
+        icon: "💰",
+        title: "Payment Received",
+        message: `A payment of <b>$${numAmount.toFixed(2)}</b> was received for payout name <b>${payoutName.name}</b>.`,
+        details: [
+          { label: "Payout Name", value: payoutName.name },
+          { label: "Amount", value: `$${numAmount.toFixed(2)}` },
+          { label: "Payment Status", value: payoutName.paymentStatus },
+          { label: "Maturity Date", value: new Date(finalMaturityDate).toLocaleDateString('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' }) }
+        ]
+      });
+      telegramService.sendToUser(clientUserId, teleMsg).catch(() => {});
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Payment of $${numAmount.toFixed(2)} added to ${payoutName.name} successfully.`,
+      data: {
+        payoutName,
+        log: newLog
+      }
+    });
+
+  } catch (error) {
+    console.error("Add single payment error:", error);
+    return res.status(500).json({ message: "Server error adding payment", error: error.message });
+  }
+};
+
 module.exports = {
   uploadPayments,
+  addSinglePayment,
   getMaturitySettings,
   updateMaturitySettings,
   getUploadHistories,

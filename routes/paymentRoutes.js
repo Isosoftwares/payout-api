@@ -6,6 +6,7 @@ const fs = require("fs");
 const { authenticateToken, isAdmin } = require("../middleware/auth");
 const { 
   uploadPayments, 
+  addSinglePayment,
   getMaturitySettings, 
   updateMaturitySettings,
   getUploadHistories,
@@ -42,6 +43,7 @@ const upload = multer({
 });
 
 router.post("/upload", authenticateToken, isAdmin, upload.single("file"), uploadPayments);
+router.post("/single", authenticateToken, isAdmin, addSinglePayment);
 router.get("/maturity-settings", authenticateToken, isAdmin, getMaturitySettings);
 router.put("/maturity-settings", authenticateToken, isAdmin, updateMaturitySettings);
 router.get("/upload-histories", authenticateToken, isAdmin, getUploadHistories);

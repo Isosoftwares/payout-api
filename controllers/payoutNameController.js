@@ -148,6 +148,50 @@ const uploadPayoutNames = async (req, res) => {
   }
 };
 
+// Helper: attach paymentReceivedCount and hasMultiplePayments to payout name docs
+const enrichWithPaymentCounts = async (payoutNames) => {
+  if (!payoutNames || payoutNames.length === 0) return [];
+  try {
+    const ids = payoutNames.map((p) => p._id);
+    const logCounts = await PayoutNameLog.aggregate([
+      {
+        $match: {
+          payoutName: { $in: ids },
+          action: { $in: ["payment_received", "payment_reversed"] },
+        },
+      },
+      {
+        $group: {
+          _id: "$payoutName",
+          receivedCount: {
+            $sum: { $cond: [{ $eq: ["$action", "payment_received"] }, 1, 0] },
+          },
+          reversedCount: {
+            $sum: { $cond: [{ $eq: ["$action", "payment_reversed"] }, 1, 0] },
+          },
+        },
+      },
+    ]);
+
+    const countMap = {};
+    for (const item of logCounts) {
+      const net = Math.max(0, item.receivedCount - item.reversedCount);
+      countMap[item._id.toString()] = net;
+    }
+
+    return payoutNames.map((p) => {
+      const obj = p.toObject ? p.toObject() : { ...p };
+      const cnt = countMap[obj._id.toString()] || 0;
+      obj.paymentReceivedCount = cnt;
+      obj.hasMultiplePayments = cnt > 1;
+      return obj;
+    });
+  } catch (err) {
+    console.error("Error enriching payout names with payment counts:", err);
+    return payoutNames;
+  }
+};
+
 // @desc    Get all Payout Names
 // @route   GET /api/payout-names
 // @access  Private/Admin
@@ -210,12 +254,14 @@ const getPayoutNames = async (req, res) => {
     }
 
     const total = await PayoutName.countDocuments(query);
-    const payoutNames = await PayoutName.find(query)
+    const rawPayoutNames = await PayoutName.find(query)
       .populate('allocatedTo', 'email profile')
       .populate('claimedForSubaccount', 'username')
       .sort({ claimedAt: -1, createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit);
+
+    const payoutNames = await enrichWithPaymentCounts(rawPayoutNames);
 
     res.status(200).json({
       data: payoutNames,
@@ -666,9 +712,11 @@ const getMyInventory = async (req, res) => {
       }
     }
 
-    const claimedNames = await PayoutName.find({ $and: andConditions })
+    const rawClaimedNames = await PayoutName.find({ $and: andConditions })
       .populate('claimedForSubaccount', 'username')
       .sort({ claimedAt: -1, updatedAt: -1 });
+
+    const claimedNames = await enrichWithPaymentCounts(rawClaimedNames);
 
     res.status(200).json({
       success: true,
@@ -856,7 +904,8 @@ const getSubaccountInventory = async (req, res) => {
       ];
     }
 
-    const claimedNames = await PayoutName.find(filter).sort({ updatedAt: -1 });
+    const rawClaimedNames = await PayoutName.find(filter).sort({ updatedAt: -1 });
+    const claimedNames = await enrichWithPaymentCounts(rawClaimedNames);
 
     res.status(200).json({
       success: true,
@@ -1495,10 +1544,22 @@ const getPayoutNameLogs = async (req, res) => {
       .populate('performedBy', 'email profile username role')
       .sort({ timestamp: -1, createdAt: -1 });
 
+    let sanitizedLogs = logs;
+    if (req.user.role !== 'admin') {
+      sanitizedLogs = logs.map(log => {
+        const logObj = log.toObject ? log.toObject() : { ...log };
+        // Do not disclose admin personal identity to clients
+        if (logObj.performedByRole === 'admin' || logObj.performedBy?.role === 'admin') {
+          logObj.performedBy = null;
+        }
+        return logObj;
+      });
+    }
+
     return res.status(200).json({
       success: true,
       payoutName,
-      logs
+      logs: sanitizedLogs
     });
   } catch (error) {
     console.error("Error fetching payout name logs:", error);
@@ -1524,10 +1585,7 @@ const addPayoutNameLogNarration = async (req, res) => {
     }
 
     if (req.user.role !== 'admin') {
-      const clientOwnerId = payoutName.allocatedTo?.toString();
-      if (clientOwnerId !== req.user.id) {
-        return res.status(403).json({ message: "You are not authorized to add notes to this payout name." });
-      }
+      return res.status(403).json({ message: "Access denied. Only administrators can add operational notes." });
     }
 
     const newLog = await PayoutNameLog.create({

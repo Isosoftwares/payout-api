@@ -19,6 +19,7 @@ const {
 router.get('/', authenticateToken, isAdmin, userController.getAllUsers);
 router.get('/admin/users/statistics', authenticateToken, isAdmin, userController.getUserStatistics);
 router.get('/:id', authenticateToken, isAdmin, userController.getUserById);
+router.get('/:id/payment-history', authenticateToken, isAdmin, userController.getClientPaymentHistory);
 router.post('/admin/users', authenticateToken, isAdmin, userController.createUser);
 router.patch('/:id', authenticateToken, isAdmin, userController.updateUser);
 router.delete('/:id', authenticateToken, isAdmin, userController.deleteUser);

@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const PayoutName = require("../models/PayoutName");
+const PayoutNameLog = require("../models/PayoutNameLog");
 const User = require("../models/User");
 const Subaccount = require("../models/Subaccount");
 
@@ -96,6 +97,27 @@ const getDailyReport = async (req, res) => {
       query.paymentStatus = paymentStatus;
     }
 
+    // Search filter (by payout name, account number, or routing number)
+    const search = req.query.search?.trim();
+    if (search) {
+      const searchOr = [
+        { name: { $regex: search, $options: "i" } },
+        { accountNumber: { $regex: search, $options: "i" } },
+        { routingNumber: { $regex: search, $options: "i" } },
+      ];
+
+      if (query.$or) {
+        const roleOr = query.$or;
+        delete query.$or;
+        query.$and = [
+          { $or: roleOr },
+          { $or: searchOr },
+        ];
+      } else {
+        query.$or = searchOr;
+      }
+    }
+
     // Calculate totals across ALL matching records using aggregation
     const totalsAggregation = await PayoutName.aggregate([
       { $match: query },
@@ -112,12 +134,55 @@ const getDailyReport = async (req, res) => {
     const totalAmount = totalsAggregation[0]?.totalAmount || 0;
 
     // Fetch paginated records
-    const records = await PayoutName.find(query)
+    const rawRecords = await PayoutName.find(query)
       .populate("allocatedTo", "email profile")
       .populate("claimedForSubaccount", "username")
       .sort(dateType === "maturity" ? { maturityDate: -1, createdAt: -1 } : { paymentReceivedDate: -1, createdAt: -1 })
       .skip(isExport ? 0 : (page - 1) * limit)
       .limit(limit);
+
+    // Enrich records with paymentReceivedCount
+    let records = rawRecords;
+    if (rawRecords.length > 0) {
+      try {
+        const ids = rawRecords.map((p) => p._id);
+        const logCounts = await PayoutNameLog.aggregate([
+          {
+            $match: {
+              payoutName: { $in: ids },
+              action: { $in: ["payment_received", "payment_reversed"] },
+            },
+          },
+          {
+            $group: {
+              _id: "$payoutName",
+              receivedCount: {
+                $sum: { $cond: [{ $eq: ["$action", "payment_received"] }, 1, 0] },
+              },
+              reversedCount: {
+                $sum: { $cond: [{ $eq: ["$action", "payment_reversed"] }, 1, 0] },
+              },
+            },
+          },
+        ]);
+
+        const countMap = {};
+        for (const item of logCounts) {
+          const net = Math.max(0, item.receivedCount - item.reversedCount);
+          countMap[item._id.toString()] = net;
+        }
+
+        records = rawRecords.map((p) => {
+          const obj = p.toObject ? p.toObject() : { ...p };
+          const cnt = countMap[obj._id.toString()] || 0;
+          obj.paymentReceivedCount = cnt;
+          obj.hasMultiplePayments = cnt > 1;
+          return obj;
+        });
+      } catch (enrichErr) {
+        console.error("Error enriching daily report records:", enrichErr);
+      }
+    }
 
     res.status(200).json({
       success: true,

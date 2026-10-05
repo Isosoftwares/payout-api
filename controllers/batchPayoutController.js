@@ -1,6 +1,7 @@
 const PayoutTransaction = require('../models/PayoutTransaction');
 const PayoutName = require('../models/PayoutName');
 const PayoutNameLog = require('../models/PayoutNameLog');
+const PaymentRecord = require('../models/PaymentRecord');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const telegramService = require('../services/telegramService');
@@ -164,6 +165,16 @@ const executeBatchPayout = async (req, res) => {
       { _id: { $in: payoutNameIds } },
       { $set: { paymentStatus: 'paid', amount: 0, maturityDate: null, paymentReceivedDate: null } }
     );
+
+    // Update corresponding PaymentRecords
+    try {
+      await PaymentRecord.updateMany(
+        { payoutName: { $in: payoutNameIds }, isReversed: false, paymentStatus: { $ne: 'paid' } },
+        { $set: { paymentStatus: 'paid', payoutTransactionId: transaction._id } }
+      );
+    } catch (prErr) {
+      console.error('Error updating PaymentRecord status to paid:', prErr);
+    }
 
     // Create activity logs for paid names
     try {

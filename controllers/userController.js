@@ -173,19 +173,49 @@ const getUserById = asyncHandler(async (req, res) => {
   ]);
 
   const PayoutName = require('../models/PayoutName');
+  const PayoutNameLog = require('../models/PayoutNameLog');
   const myNames = await PayoutName.find({ allocatedTo: user._id });
 
   let totalReceivedUSD = 0;
   let totalMaturedUSD = 0;
+  let namesWithBalanceCount = 0;
 
   myNames.forEach(name => {
     const amt = name.amount || 0;
+    if (amt > 0) namesWithBalanceCount++;
     if (name.paymentStatus === 'received') {
       totalReceivedUSD += amt;
     } else if (name.paymentStatus === 'matured') {
       totalMaturedUSD += amt;
     }
   });
+
+  const myNameIds = myNames.map(n => n._id);
+  let multiPaymentNamesCount = 0;
+  if (myNameIds.length > 0) {
+    try {
+      const multiAgg = await PayoutNameLog.aggregate([
+        {
+          $match: {
+            payoutName: { $in: myNameIds },
+            action: 'payment_received'
+          }
+        },
+        {
+          $group: {
+            _id: "$payoutName",
+            count: { $sum: 1 }
+          }
+        },
+        {
+          $match: { count: { $gt: 1 } }
+        }
+      ]);
+      multiPaymentNamesCount = multiAgg.length;
+    } catch (e) {
+      console.error('Error calculating multi-payment names:', e);
+    }
+  }
 
   const PayoutTransaction = require('../models/PayoutTransaction');
   const profitStats = await PayoutTransaction.aggregate([
@@ -199,6 +229,12 @@ const getUserById = asyncHandler(async (req, res) => {
       }
     }
   ]);
+
+  const totalPaidGrossUSD = profitStats[0]?.totalPaidUSD || 0;
+  const totalFeesUSD = profitStats[0]?.totalFeesUSD || 0;
+  const totalNetPaidUSD = totalPaidGrossUSD - totalFeesUSD;
+  const totalUnpaidUSD = totalReceivedUSD + totalMaturedUSD;
+  const allTimeGrossUSD = totalUnpaidUSD + totalPaidGrossUSD;
   
   const userData = {
     ...user.toObject(),
@@ -208,10 +244,20 @@ const getUserById = asyncHandler(async (req, res) => {
       lastActivity: null
     },
     totalProfitUSD: profitStats[0]?.totalProfitUSD || 0,
-    totalPaidUSD: profitStats[0]?.totalPaidUSD || 0,
-    totalFeesUSD: profitStats[0]?.totalFeesUSD || 0,
+    totalPaidUSD: totalPaidGrossUSD,
+    totalPaidGrossUSD,
+    totalFeesUSD,
+    totalNetPaidUSD,
     totalReceivedUSD,
-    totalMaturedUSD
+    totalMaturedUSD,
+    unmaturedBalanceUSD: totalReceivedUSD,
+    maturedBalanceUSD: totalMaturedUSD,
+    totalUnpaidUSD,
+    allTimeGrossUSD,
+    namesWithBalanceCount,
+    multiPaymentNamesCount,
+    totalClaimedNamesCount: myNames.filter(n => n.status === 'claimed').length,
+    totalAllocatedNamesCount: myNames.filter(n => n.status === 'allocated').length,
   };
   
   const response = formatResponse(true, userData);
@@ -958,10 +1004,135 @@ const setDefaultClientPaymentMethod = asyncHandler(async (req, res) => {
   res.status(response.statusCode).json(response);
 });
 
+// @desc    Get complete itemized payment history & ledger for a client
+// @route   GET /api/users/:id/payment-history
+// @access  Private/Admin
+const getClientPaymentHistory = asyncHandler(async (req, res) => {
+  const clientId = req.params.id;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const isExport = req.query.all === 'true' || req.query.download === 'true';
+  const limit = isExport ? 10000 : Math.min(200, Math.max(10, parseInt(req.query.limit) || 50));
+  const search = req.query.search?.trim() || '';
+  const status = req.query.status || 'all';
+
+  const client = await User.findById(clientId);
+  if (!client) {
+    const response = formatResponse(false, null, 'Client not found', 404);
+    return res.status(response.statusCode).json(response);
+  }
+
+  const PaymentRecord = require('../models/PaymentRecord');
+  const prCount = await PaymentRecord.countDocuments({ allocatedTo: clientId });
+
+  if (prCount > 0) {
+    const query = { allocatedTo: clientId };
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { accountNumber: { $regex: search, $options: 'i' } },
+        { routingNumber: { $regex: search, $options: 'i' } },
+      ];
+    }
+    if (status !== 'all') {
+      if (status === 'reversed') {
+        query.isReversed = true;
+      } else {
+        query.paymentStatus = status;
+        query.isReversed = { $ne: true };
+      }
+    }
+
+    const total = await PaymentRecord.countDocuments(query);
+    const records = await PaymentRecord.find(query)
+      .populate('payoutName', 'name accountNumber routingNumber status paymentStatus amount')
+      .populate('claimedForSubaccount', 'username')
+      .sort({ paymentReceivedDate: -1, createdAt: -1 })
+      .skip(isExport ? 0 : (page - 1) * limit)
+      .limit(limit);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        records,
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit) || 1,
+      },
+    });
+  }
+
+  // Fallback to PayoutNameLog & PayoutName if no PaymentRecords exist yet
+  const PayoutName = require('../models/PayoutName');
+  const PayoutNameLog = require('../models/PayoutNameLog');
+
+  const clientNames = await PayoutName.find({ allocatedTo: clientId }).populate('claimedForSubaccount', 'username');
+  const nameMap = new Map();
+  clientNames.forEach(n => nameMap.set(n._id.toString(), n));
+  const nameIds = clientNames.map(n => n._id);
+
+  const logs = await PayoutNameLog.find({
+    payoutName: { $in: nameIds },
+    action: { $in: ['payment_received', 'payment_reversed'] }
+  }).sort({ timestamp: -1 });
+
+  let mapped = logs.map(l => {
+    const pn = nameMap.get(l.payoutName?.toString());
+    const isRev = l.action === 'payment_reversed';
+    return {
+      _id: l._id,
+      payoutName: pn,
+      name: pn?.name || 'Unknown',
+      accountNumber: pn?.accountNumber || '',
+      routingNumber: pn?.routingNumber || '',
+      claimedForSubaccount: pn?.claimedForSubaccount || null,
+      amount: l.amount || 0,
+      paymentReceivedDate: l.paymentDate || l.timestamp,
+      maturityDate: l.maturityDate,
+      paymentStatus: isRev ? 'reversed' : (l.paymentStatus || 'received'),
+      isReversed: isRev,
+      uploadFileName: l.narration || '',
+      createdAt: l.timestamp,
+    };
+  });
+
+  if (search) {
+    const s = search.toLowerCase();
+    mapped = mapped.filter(r =>
+      r.name?.toLowerCase().includes(s) ||
+      r.accountNumber?.includes(s) ||
+      r.routingNumber?.includes(s)
+    );
+  }
+
+  if (status !== 'all') {
+    if (status === 'reversed') {
+      mapped = mapped.filter(r => r.isReversed);
+    } else {
+      mapped = mapped.filter(r => !r.isReversed && r.paymentStatus === status);
+    }
+  }
+
+  const total = mapped.length;
+  const paginated = isExport ? mapped : mapped.slice((page - 1) * limit, page * limit);
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      records: paginated,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit) || 1,
+    },
+  });
+});
+
 module.exports = {
   // Admin user management
   getAllUsers,
   getUserById,
+  getClientPaymentHistory,
   createUser,
   updateUser,
   deleteUser,
